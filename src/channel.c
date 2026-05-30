@@ -670,20 +670,32 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                         return -1;
                     }
                 }
+                /* Channel found — validate state before accepting SYN.
+                 * Reject SYN on closing/closed channels to prevent stale revival.
+                 * SYN_SENT (peer's retransmission) and ESTABLISHED (race) are OK. */
+                if (ch->state == CHANNEL_FIN_SENT ||
+                    ch->state == CHANNEL_FIN_RCVD ||
+                    ch->state == CHANNEL_TIME_WAIT ||
+                    ch->state == CHANNEL_CLOSED) {
+                    LOG_WARN("channel_process_frame: "
+                             "SYN for channel %u in closing state %d, ignoring",
+                             hdr->channel_id, ch->state);
+                    return 0;
+                }
             }
 
-            /* 发送 ACK 并进入 ESTABLISHED 状态 */
+            /* 发送 ACK，进入 SYN_RCVD（等待对端数据确认连接） */
             if (channel_send_ctrl(ch, MPF_ACK) != 0) {
                 LOG_ERROR("channel_process_frame: "
                           "failed to send ACK for channel %u",
                           hdr->channel_id);
             }
-            ch->state          = CHANNEL_ESTABLISHED;
+            ch->state          = CHANNEL_SYN_RCVD;
             ch->last_peer_seen = now;
             ch->last_active    = now;
 
             LOG_DEBUG("channel_process_frame: "
-                      "channel %u SYN → ESTABLISHED (responder)",
+                      "channel %u SYN → SYN_RCVD (responder)",
                       hdr->channel_id);
             break;
 
@@ -914,6 +926,14 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
             /* 更新接收统计 */
             ch->stats.rx_frames++;
             ch->stats.rx_bytes += (uint64_t)kcp_input_len;
+
+            /* SYN_RCVD → ESTABLISHED: 收到对端首个数据段，连接确认 */
+            if (ch->state == CHANNEL_SYN_RCVD) {
+                ch->state = CHANNEL_ESTABLISHED;
+                LOG_DEBUG("channel_process_frame: "
+                          "channel %u SYN_RCVD → ESTABLISHED (first data)",
+                          hdr->channel_id);
+            }
 
             /*
              * 将数据输入 KCP。

@@ -31,7 +31,7 @@
 #define MPF_RST                 0x08        /* 强制复位 */
 #define MPF_PING                0x10        /* 心跳探测 */
 #define MPF_PONG                0x20        /* 心跳响应 */
-#define MPF_CRYPTO              0x40        /* 加密标志（SM4-CTR + HMAC-SM3） */
+#define MPF_CRYPTO              0x40        /* 加密标志（SM4-CBC + HMAC-SM3） */
 #define MPF_CTRL_MASK           0x3F        /* 控制帧标志掩码 */
 
 /* 判断帧类型 */
@@ -74,7 +74,7 @@
 
 /* 加密常量 */
 #define SM4_KEY_SIZE            16          /* SM4 密钥长度（128 位） */
-#define SM4_IV_SIZE             16          /* SM4-CTR IV 长度 */
+#define SM4_IV_SIZE             16          /* SM4-CBC IV 长度 */
 #define SM3_HMAC_SIZE           32          /* SM3-HMAC 输出长度 */
 #define SM4_IV_LEN             SM4_IV_SIZE
 #define SM3_HMAC_LEN           SM3_HMAC_SIZE

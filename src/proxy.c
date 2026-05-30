@@ -5,7 +5,7 @@
  * 支持正向代理（监听本地→转发到远端）和反向代理（从 AF_PACKET 接收→连接本地服务）。
  *
  * 使用 edge-triggered epoll 进行高性能 I/O 事件处理。
- * 通过 ev.data.ptr 存储通道指针以实现 O(1) 的 fd→channel 查找。
+ * 通过 ev.data.fd 存储文件描述符，proxy_find_channel_by_fd() 扫描哈希表查找通道。
  * TCP_NODELAY 确保低延迟，SO_REUSEADDR 支持快速重启。
  */
 
