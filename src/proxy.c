@@ -90,8 +90,9 @@ static int proxy_epoll_mod_events(global_ctx_t *ctx, int fd,
 {
     struct epoll_event ev;
 
+    (void)ptr;  /* 已改用 data.fd 存储 fd，ptr 保留兼容 */
     ev.events   = events;
-    ev.data.ptr = ptr;
+    ev.data.fd  = fd;
 
     if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_MOD, fd, &ev) < 0) {
         LOG_ERROR("proxy_epoll_mod_events: epoll_ctl(EPOLL_CTL_MOD, fd=%d, "
@@ -1063,11 +1064,12 @@ int proxy_epoll_add(global_ctx_t *ctx, int fd, void *ptr)
     /*
      * EPOLLIN:  监听可读事件
      * EPOLLET:  边缘触发模式（高性能，避免重复通知）
-     * ev.data.ptr = ch:  将通道指针存储在事件数据中，
-     *                    实现 O(1) 的 fd→channel 查找。
+     * data.fd = fd:  存储 fd，main.c 通过 data.fd 获取触发源。
      */
     ev.events   = EPOLLIN | EPOLLET;
-    ev.data.ptr = ptr;
+    ev.data.fd  = fd;
+
+    (void)ptr;  /* 已改用 data.fd 存储 fd，ptr 保留兼容 */
 
     if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
         LOG_ERROR("proxy_epoll_add: epoll_ctl(EPOLL_CTL_ADD, fd=%d) "
