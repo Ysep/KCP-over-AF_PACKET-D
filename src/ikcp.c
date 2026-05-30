@@ -9,6 +9,35 @@
 // + Lightweight, distributed as a single source file.
 //
 //=====================================================================
+//
+// 【中文说明】
+// KCP 是一个快速可靠的 ARQ (自动重传请求) 协议，使用不同于 TCP 的拥塞控制算法。
+// 它以比 TCP 更高的带宽为代价，换取 30%-40% 的平均延迟降低。
+// 本文件被 kcp_wrap.c 封装，通过 kcp_wrap_create/send/recv/update 等函数调用。
+//
+// 【核心概念】
+//   - conv:   会话 ID，本项目中对应 channel_id
+//   - seg:    数据段 (segment)，KCP 内部传输单元
+//   - snd_queue / rcv_queue: 发送/接收队列
+//   - snd_buf / rcv_buf:     发送/接收缓冲区（窗口）
+//   - IKCP_CMD_PUSH: 数据推送命令 (81)
+//   - IKCP_CMD_ACK:  确认命令 (82)
+//   - IKCP_CMD_WASK: 窗口探测请求 (83)
+//   - IKCP_CMD_WINS: 窗口大小通知 (84)
+//
+// 【关键函数索引】
+//   ikcp_create()  — 创建 KCP 实例
+//   ikcp_release() — 销毁 KCP 实例
+//   ikcp_send()    — 发送数据（应用层 → KCP）
+//   ikcp_recv()    — 接收数据（KCP → 应用层）
+//   ikcp_input()   — 输入数据段（网络层 → KCP）
+//   ikcp_update()  — 更新状态机（驱动定时器、重传）
+//   ikcp_flush()   — 刷新待发送数据到 output 回调
+//   ikcp_nodelay() — 配置 nodelay 模式参数
+//   ikcp_wndsize() — 设置窗口大小
+//   ikcp_setmtu()  — 设置 MTU
+//
+//=====================================================================
 #include "ikcp.h"
 
 #include <stddef.h>
@@ -20,34 +49,35 @@
 #define IKCP_FASTACK_CONSERVE
 
 //=====================================================================
-// KCP BASIC
+// KCP 协议常量 (Protocol Constants)
 //=====================================================================
-const IUINT32 IKCP_RTO_NDL = 30;		// no delay min rto
-const IUINT32 IKCP_RTO_MIN = 100;		// normal min rto
-const IUINT32 IKCP_RTO_DEF = 200;
-const IUINT32 IKCP_RTO_MAX = 60000;
-const IUINT32 IKCP_CMD_PUSH = 81;		// cmd: push data
-const IUINT32 IKCP_CMD_ACK  = 82;		// cmd: ack
-const IUINT32 IKCP_CMD_WASK = 83;		// cmd: window probe (ask)
-const IUINT32 IKCP_CMD_WINS = 84;		// cmd: window size (tell)
-const IUINT32 IKCP_ASK_SEND = 1;		// need to send IKCP_CMD_WASK
-const IUINT32 IKCP_ASK_TELL = 2;		// need to send IKCP_CMD_WINS
-const IUINT32 IKCP_WND_SND = 32;
-const IUINT32 IKCP_WND_RCV = 128;       // must >= max fragment size
-const IUINT32 IKCP_MTU_DEF = 1400;
-const IUINT32 IKCP_ACK_FAST	= 3;
-const IUINT32 IKCP_INTERVAL	= 100;
-const IUINT32 IKCP_OVERHEAD = 24;
-const IUINT32 IKCP_DEADLINK = 20;
-const IUINT32 IKCP_THRESH_INIT = 2;
-const IUINT32 IKCP_THRESH_MIN = 2;
-const IUINT32 IKCP_PROBE_INIT = 5000;		// 7 secs to probe window size
-const IUINT32 IKCP_PROBE_LIMIT = 120000;	// up to 120 secs to probe window
-const IUINT32 IKCP_FASTACK_LIMIT = 5;		// max times to trigger fastack
+const IUINT32 IKCP_RTO_NDL = 30;		// nodelay 模式最小 RTO (毫秒)
+const IUINT32 IKCP_RTO_MIN = 100;		// 普通模式最小 RTO (毫秒)
+const IUINT32 IKCP_RTO_DEF = 200;       // 默认 RTO (毫秒)
+const IUINT32 IKCP_RTO_MAX = 60000;     // 最大 RTO (毫秒)
+const IUINT32 IKCP_CMD_PUSH = 81;		// 命令: 推送数据
+const IUINT32 IKCP_CMD_ACK  = 82;		// 命令: 确认
+const IUINT32 IKCP_CMD_WASK = 83;		// 命令: 窗口探测 (询问对端窗口大小)
+const IUINT32 IKCP_CMD_WINS = 84;		// 命令: 窗口通知 (告知本端窗口大小)
+const IUINT32 IKCP_ASK_SEND = 1;		// 需要发送 WASK 探测
+const IUINT32 IKCP_ASK_TELL = 2;		// 需要发送 WINS 通知
+const IUINT32 IKCP_WND_SND = 32;        // 默认发送窗口大小
+const IUINT32 IKCP_WND_RCV = 128;       // 默认接收窗口大小 (必须 >= 最大分片数)
+const IUINT32 IKCP_MTU_DEF = 1400;      // 默认 MTU
+const IUINT32 IKCP_ACK_FAST	= 3;        // 快速确认阈值 (收到此数量的重复ACK触发快速重传)
+const IUINT32 IKCP_INTERVAL	= 100;      // 默认内部更新间隔 (毫秒)
+const IUINT32 IKCP_OVERHEAD = 24;       // KCP 协议头开销 (字节)
+const IUINT32 IKCP_DEADLINK = 20;       // 死链检测: 连续无响应更新次数阈值
+const IUINT32 IKCP_THRESH_INIT = 2;     // 慢启动阈值初始值
+const IUINT32 IKCP_THRESH_MIN = 2;      // 慢启动阈值最小值
+const IUINT32 IKCP_PROBE_INIT = 5000;	// 窗口探测初始间隔 (毫秒, 5秒)
+const IUINT32 IKCP_PROBE_LIMIT = 120000;// 窗口探测最大间隔 (毫秒, 120秒)
+const IUINT32 IKCP_FASTACK_LIMIT = 5;   // 快速确认触发次数上限
 
 
 //---------------------------------------------------------------------
-// encode / decode
+// 编解码函数 (encode / decode)
+// 所有多字节整数使用小端序 (Little-Endian / LSB first)
 //---------------------------------------------------------------------
 
 /* encode 8 bits unsigned int */
@@ -139,7 +169,8 @@ static inline long _itimediff(IUINT32 later, IUINT32 earlier)
 }
 
 //---------------------------------------------------------------------
-// manage segment
+// 数据段管理 (segment management)
+// 数据段 (IKCPSEG) 是 KCP 内部传输的基本单元
 //---------------------------------------------------------------------
 typedef struct IKCPSEG IKCPSEG;
 
@@ -233,7 +264,20 @@ void ikcp_qprint(const char *name, const struct IQUEUEHEAD *head)
 
 
 //---------------------------------------------------------------------
-// create a new kcpcb
+// ikcp_create - 创建 KCP 实例
+//
+// 参数:
+//   conv: 会话 ID (本项目中对应 channel_id)
+//   user: 用户数据指针 (本项目中指向 channel_t)
+//
+// 返回值:
+//   成功返回 KCP 控制块指针，失败返回 NULL (内存不足)
+//
+// 流程:
+//   1. 分配 ikcpcb 结构体内存并清零
+//   2. 初始化所有队列 (snd_queue, rcv_queue, snd_buf, rcv_buf)
+//   3. 设置默认参数: MTU=1400, MSS=MTU-OVERHEAD
+//   4. 初始化定时器和状态变量
 //---------------------------------------------------------------------
 ikcpcb* ikcp_create(IUINT32 conv, void *user)
 {
@@ -303,7 +347,14 @@ ikcpcb* ikcp_create(IUINT32 conv, void *user)
 
 
 //---------------------------------------------------------------------
-// release a kcpcb
+// ikcp_release - 销毁 KCP 实例，释放所有资源
+//
+// 流程:
+//   1. 释放拥塞控制回调 (ccops)
+//   2. 逐个释放所有队列中的数据段:
+//      snd_buf (发送缓冲区) → rcv_buf (接收缓冲区)
+//      → snd_queue (发送队列) → rcv_queue (接收队列)
+//   3. 释放 KCP 控制块自身内存
 //---------------------------------------------------------------------
 void ikcp_release(ikcpcb *kcp)
 {
@@ -363,7 +414,22 @@ void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len,
 
 
 //---------------------------------------------------------------------
-// upper-level recv: returns size, or a negative value for EAGAIN
+// ikcp_recv - 从 KCP 接收数据（KCP → 应用层）
+//
+// 参数:
+//   buffer: 接收缓冲区
+//   len:    缓冲区大小
+//
+// 返回值:
+//   >0:  成功接收的字节数
+//   -1:  无完整消息可读 (EAGAIN 语义)
+//   -2:  peek 长度异常
+//   -3:  缓冲区不足 (peeksize > len)
+//
+// 流程:
+//   1. 计算下一条完整消息的长度 (ikcp_peeksize)
+//   2. 如果缓冲区足够大，从 rcv_queue 中取出数据段并拷贝
+//   3. 返回实际拷贝的字节数
 //---------------------------------------------------------------------
 int ikcp_recv(ikcpcb *kcp, char *buffer, int len)
 {
@@ -474,7 +540,21 @@ int ikcp_peeksize(const ikcpcb *kcp)
 
 
 //---------------------------------------------------------------------
-// upper-level send: returns size, or a negative value on error
+// ikcp_send - 发送数据到 KCP（应用层 → KCP）
+//
+// 参数:
+//   buffer: 待发送数据
+//   len:    数据长度
+//
+// 返回值:
+//   0:  成功入队
+//   -1: 参数错误
+//   -2: 内存分配失败
+//
+// 流程:
+//   1. 将数据按 MSS 分片
+//   2. 每个分片封装为 IKCPSEG 数据段，加入 snd_queue
+//   3. 分片数必须 < IKCP_WND_RCV (128)，否则返回 -2
 //---------------------------------------------------------------------
 int ikcp_send(ikcpcb *kcp, const char *buffer, int len)
 {
@@ -779,7 +859,24 @@ void ikcp_parse_data(ikcpcb *kcp, IKCPSEG *newseg)
 
 
 //---------------------------------------------------------------------
-// input data
+// ikcp_input - 输入收到的数据段（网络层 → KCP）
+//
+// 参数:
+//   data: 收到的原始 KCP 数据段
+//   size: 数据段长度
+//
+// 返回值:
+//   0:  成功处理
+//   <0: 错误 (格式错误或校验失败)
+//
+// 流程:
+//   1. 解析 KCP 协议头 (conv, cmd, frg, wnd, ts, sn, una, len)
+//   2. 根据命令类型分发:
+//      IKCP_CMD_ACK: 处理确认，更新 snd_una，从 snd_buf 移除已确认段
+//      IKCP_CMD_PUSH: 将数据段放入 rcv_buf，检查完整性
+//      IKCP_CMD_WASK: 回复 WINS (窗口探测)
+//      IKCP_CMD_WINS: 更新对端窗口大小 (rmt_wnd)
+//   3. 将完整连续的数据段从 rcv_buf 移动到 rcv_queue
 //---------------------------------------------------------------------
 int ikcp_input(ikcpcb *kcp, const char *data, long size)
 {
@@ -973,7 +1070,18 @@ static int ikcp_wnd_unused(const ikcpcb *kcp)
 
 
 //---------------------------------------------------------------------
-// ikcp_flush
+// ikcp_flush - 刷新待发送数据到 output 回调
+//
+// 将 snd_queue 中的数据段移动到 snd_buf，将 snd_buf 中待发送的数据
+// 通过 kcp->output 回调发送到网络层。
+//
+// 关键逻辑:
+//   1. 从 snd_queue 取数据段 → 设置 sn/ts/una → 移入 snd_buf
+//   2. 从 snd_buf 取数据段 → 编码为 KCP 段 → 调用 output 回调
+//   3. 拥塞控制: cwnd = min(snd_wnd, rmt_wnd)，超过则暂停发送
+//   4. 快速重传: 当收到 fastlimit 个以上 ACK 时触发重传
+//   5. 超时重传: 当 RTO 超时时触发重传
+//   6. 窗口探测: 当 rmt_wnd=0 时定期发送探测包
 //---------------------------------------------------------------------
 void ikcp_flush(ikcpcb *kcp)
 {
@@ -1235,9 +1343,20 @@ void ikcp_flush(ikcpcb *kcp)
 
 
 //---------------------------------------------------------------------
-// update state (call it repeatedly, every 10ms-100ms), or you can ask
-// ikcp_check when to call it again (if no ikcp_input/_send calls occur).
-// 'current' - current timestamp in milliseconds.
+// ikcp_update - 更新 KCP 状态机（驱动定时器）
+//
+// 参数:
+//   current: 当前时间戳 (毫秒, 单调递增)
+//
+// 调用频率:
+//   建议每 10ms-100ms 调用一次，本项目每 10ms 调用一次
+//
+// 流程:
+//   1. 计算距上次更新的时间差 (slap)
+//   2. 检查是否需要发送窗口探测 (IKCP_CMD_WASK)
+//   3. 更新重传定时器 (rx_rto)
+//   4. 检查死链: 如果超过 IKCP_DEADLINK 次无响应，标记 state=-1
+//   5. 调用 ikcp_flush() 发送待处理数据
 //---------------------------------------------------------------------
 void ikcp_update(ikcpcb *kcp, IUINT32 current)
 {
@@ -1316,6 +1435,17 @@ IUINT32 ikcp_check(const ikcpcb *kcp, IUINT32 current)
 
 
 
+//---------------------------------------------------------------------
+// ikcp_setmtu - 设置 KCP 最大传输单元 (MTU)
+//
+// 参数:
+//   mtu: 新的 MTU 值 (50 ~ 65535, 必须 >= IKCP_OVERHEAD)
+//
+// 流程:
+//   1. 检查 mtu 合法性 (不能小于 IKCP_OVERHEAD=24)
+//   2. 分配新的内部缓冲区 (大小为 (mtu+OVERHEAD)*3)
+//   3. 更新 mss = mtu - IKCP_OVERHEAD
+//---------------------------------------------------------------------
 int ikcp_setmtu(ikcpcb *kcp, int mtu)
 {
 	char *buffer;
@@ -1339,6 +1469,17 @@ int ikcp_interval(ikcpcb *kcp, int interval)
 	return 0;
 }
 
+//---------------------------------------------------------------------
+// ikcp_nodelay - 配置 KCP nodelay 模式参数
+//
+// 参数:
+//   nodelay:  0=普通模式 / 1=nodelay模式 (更低的RTO)
+//   interval: 内部更新间隔 (ms), 范围 [10, 5000]
+//   resend:   快速重传阈值 (收到此数量的重复ACK触发快速重传)
+//   nc:       是否禁用拥塞控制 (0=启用 / 1=禁用)
+//
+// nodelay=1 时 RTO 最小值从 100ms 降至 30ms (IKCP_RTO_NDL)
+//---------------------------------------------------------------------
 int ikcp_nodelay(ikcpcb *kcp, int nodelay, int interval, int resend, int nc)
 {
 	if (nodelay >= 0) {
@@ -1365,6 +1506,13 @@ int ikcp_nodelay(ikcpcb *kcp, int nodelay, int interval, int resend, int nc)
 }
 
 
+//---------------------------------------------------------------------
+// ikcp_wndsize - 设置 KCP 发送/接收窗口大小
+//
+// 参数:
+//   sndwnd: 发送窗口大小 (>0 有效)
+//   rcvwnd: 接收窗口大小 (>0 有效, 自动调整为 >= IKCP_WND_RCV=128)
+//---------------------------------------------------------------------
 int ikcp_wndsize(ikcpcb *kcp, int sndwnd, int rcvwnd)
 {
 	if (kcp) {
@@ -1378,6 +1526,12 @@ int ikcp_wndsize(ikcpcb *kcp, int sndwnd, int rcvwnd)
 	return 0;
 }
 
+//---------------------------------------------------------------------
+// ikcp_waitsnd - 获取 KCP 等待发送的字节数
+//
+// 返回值: nsnd_buf (发送缓冲区中的段数) + nsnd_que (发送队列中的段数)
+// 用于判断是否需要继续调用 ikcp_update 来刷新数据
+//---------------------------------------------------------------------
 int ikcp_waitsnd(const ikcpcb *kcp)
 {
 	return kcp->nsnd_buf + kcp->nsnd_que;

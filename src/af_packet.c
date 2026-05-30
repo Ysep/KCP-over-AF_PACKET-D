@@ -6,6 +6,57 @@
  *
  * 所有函数在错误路径上均通过 LOG_ERROR 记录 errno，
  * 并返回适当的错误码。缓冲区操作均包含溢出保护。
+ *
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║                   AF_PACKET 原始套接字 API 使用说明                        ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                          ║
+ * ║   AF_PACKET 允许用户态程序绕过内核 TCP/IP 协议栈，直接在数据链路层        ║
+ * ║   收发以太网帧。关键系统调用和创建步骤：                                   ║
+ * ║                                                                          ║
+ * ║   1. socket(AF_PACKET, SOCK_RAW, htons(ethertype))                       ║
+ * ║      创建指定 EtherType 的原始套接字                                      ║
+ * ║      ethertype 参数同时作为绑定过滤条件                                   ║
+ * ║                                                                          ║
+ * ║   2. setsockopt(SOL_PACKET, PACKET_VERSION, TPACKET_V2)                  ║
+ * ║      升级到 TPACKET_V2 以获得更高的吞吐量                                 ║
+ * ║      失败时自动回退到 TPACKET_V1                                          ║
+ * ║                                                                          ║
+ * ║   3. setsockopt(SOL_SOCKET, SO_SNDBUF / SO_RCVBUF)                       ║
+ * ║      扩大套接字缓冲区 (256KB发送 / 512KB接收)                              ║
+ * ║                                                                          ║
+ * ║   4. bind(sock, &sockaddr_ll, sizeof(sll))                               ║
+ * ║      绑定到指定网卡接口 (sll_ifindex = 接口索引)                          ║
+ * ║                                                                          ║
+ * ║   5. fcntl(sock, F_SETFL, O_NONBLOCK)                                    ║
+ * ║      设置为非阻塞模式，配合 epoll 使用                                    ║
+ * ║                                                                          ║
+ * ║   6. setsockopt(SOL_SOCKET, SO_ATTACH_FILTER, &bpf_prog)                 ║
+ * ║      安装 BPF 过滤器，内核级过滤仅接收匹配 EtherType 的帧                 ║
+ * ║      大幅减少不必要的用户态/内核态切换                                     ║
+ * ║                                                                          ║
+ * ║   【发送流程】                                                            ║
+ * ║   构造以太网帧: [dst_mac(6) | src_mac(6) | ethertype(2) | payload(N)]    ║
+ * ║   sendto(sock, frame, len, 0, &sockaddr_ll, sizeof(sll))                 ║
+ * ║                                                                          ║
+ * ║   【接收流程】                                                            ║
+ * ║   recvfrom(sock, buf, size, 0, &sockaddr_ll, &sll_len)                   ║
+ * ║   解析: dst_mac = buf[0..5], src_mac = buf[6..11], ethertype = buf[12..13]║
+ * ║   负载: buf[14..recvd-1]                                                  ║
+ * ║                                                                          ║
+ * ║   【BPF 过滤器字节码说明】                                                ║
+ * ║   指令0: ldh [12]        — 从偏移12加载16位 (EtherType字段)              ║
+ * ║   指令1: jeq #V, 0, 1   — 等于ethertype则继续，否则跳转到reject          ║
+ * ║   指令2: ret #0          — 拒绝（返回0字节）                              ║
+ * ║   指令3: ret #0xFFFFFFFF — 接受（返回全部）                               ║
+ * ║                                                                          ║
+ * ║   【辅助功能】                                                            ║
+ * ║   - af_packet_get_mac():   SIOCGIFHWADDR ioctl 获取 MAC 地址            ║
+ * ║   - af_packet_get_ifindex(): SIOCGIFINDEX ioctl 获取接口索引            ║
+ * ║   - af_packet_set_mtu():   SIOCSIFMTU ioctl 设置 MTU                   ║
+ * ║   - af_packet_get_mtu():   SIOCGIFMTU ioctl 获取 MTU                   ║
+ * ║   - af_packet_detect_conflict(): 解析 /proc/net/packet 检测冲突         ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 
 #include "af_packet.h"

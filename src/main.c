@@ -2,6 +2,72 @@
  * main.c - KCP-over-AF_PACKET 入口点
  *
  * 负责配置加载、验证、信号处理、主事件循环和清理。
+ *
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║                          启动序列（Startup Sequence）                     ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                          ║
+ * ║   1. 命令行参数解析                                                       ║
+ * ║      -v / --version : 打印版本号                                        ║
+ * ║      -h / --help    : 打印帮助信息                                      ║
+ * ║      <config.json>  : 配置文件路径（必需）                               ║
+ * ║                                                                          ║
+ * ║   2. 初始化全局上下文 (global_ctx_t)                                       ║
+ * ║      memset 清零，raw_sock=-1, epoll_fd=-1, running=1                    ║
+ * ║                                                                          ║
+ * ║   3. 加载配置文件 (config_load)                                           ║
+ * ║      解析 JSON 配置：网卡、EtherType、MAC、KCP参数、加密、通道列表        ║
+ * ║                                                                          ║
+ * ║   4. 验证配置 (validate_config)                                           ║
+ * ║      检查接口名、EtherType范围、KCP参数、通道ID唯一性、加密密钥            ║
+ * ║                                                                          ║
+ * ║   4b. 初始化加密模块 (crypto_init)                                        ║
+ * ║      解析 hex 密钥 → 设置 SM4 加解密上下文 → 派生 SM3-HMAC 子密钥        ║
+ * ║                                                                          ║
+ * ║   5. 安装信号处理器 (setup_signals)                                       ║
+ * ║      SIGINT/SIGTERM → 设置 running=0                                     ║
+ * ║      SIGHUP         → 设置 reload_requested=1                           ║
+ * ║      SIGPIPE        → 忽略（防止对已关闭socket写导致进程退出）            ║
+ * ║                                                                          ║
+ * ║   6. 初始化代理子系统 (proxy_init)                                        ║
+ * ║      创建 epoll 实例 (epoll_create1 with EPOLL_CLOEXEC)                  ║
+ * ║                                                                          ║
+ * ║   7. 初始化通道子系统 (channel_init)                                      ║
+ * ║      分配哈希表 (max_channels * 2 个桶，限制 [64, 65535])                 ║
+ * ║                                                                          ║
+ * ║   8. 创建 AF_PACKET 原始套接字 (af_packet_create)                         ║
+ * ║      socket(AF_PACKET, SOCK_RAW, ethertype) → bind → 非阻塞 → TPACKET_V2 ║
+ * ║                                                                          ║
+ * ║   9. 获取本地 MAC 地址 (af_packet_get_mac)                                ║
+ * ║      若配置未指定，通过 SIOCGIFHWADDR ioctl 自动获取                     ║
+ * ║                                                                          ║
+ * ║   10. 确定对端 MAC 地址                                                   ║
+ * ║       若配置未指定 → 使用广播地址 FF:FF:FF:FF:FF:FF，启动自动学习         ║
+ * ║                                                                          ║
+ * ║   11. 自动设置 NIC MTU (可选)                                             ║
+ * ║       SIOCSIFMTU ioctl                                                  ║
+ * ║                                                                          ║
+ * ║   12. 设置 BPF 过滤器 (af_packet_set_bpf)                                 ║
+ * ║      仅接收匹配 EtherType 的帧，内核级过滤减少用户态开销                  ║
+ * ║                                                                          ║
+ * ║   13. 创建通道并启动代理监听                                              ║
+ * ║      对于每个配置的通道:                                                   ║
+ * ║        - channel_create() 创建通道 + KCP 实例                             ║
+ * ║        - proxy_start_listen() 绑定监听端口 + 加入 epoll (frontend)        ║
+ * ║                                                                          ║
+ * ║   14. 将 AF_PACKET 套接字加入 epoll                                       ║
+ * ║                                                                          ║
+ * ║   15. 初始化时间基准 (kcp_wrap_clock + time)                               ║
+ * ║                                                                          ║
+ * ║   16. 主事件循环                                                          ║
+ * ║       epoll_wait(10ms) → 处理 AF_PACKET 帧 + 代理 I/O                    ║
+ * ║       → 周期任务 (KCP更新 + 心跳 + 超时检查，每10ms)                      ║
+ * ║       → 统计输出 (每60秒)                                                 ║
+ * ║       → 配置热重载 (SIGHUP 触发)                                         ║
+ * ║                                                                          ║
+ * ║   17. 清理退出 (cleanup)                                                  ║
+ * ║       优雅关闭所有通道 → KCP缓冲区排空 → 释放所有资源                      ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 
 #include <stdio.h>

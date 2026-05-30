@@ -1,0 +1,60 @@
+[Unit]
+# KCP-over-AF_PACKET 节点服务
+# 通过 AF_PACKET 原始套接字在数据链路层运行 KCP 可靠传输隧道
+Description=KCP-over-AF_PACKET node service
+Documentation=https://github.com/your-org/kcp-afpacket
+# 在网络初始化完成后启动
+After=network.target
+# 等待网络完全就绪（可选，根据部署环境调整）
+# Wants=network-online.target
+# After=network-online.target
+
+[Service]
+# 服务类型：simple — 进程在前台持续运行
+Type=simple
+
+# 二进制文件路径（由 install.sh 安装至此）
+ExecStart=/usr/local/bin/kcp-afpacket /etc/kcp-afpacket/config.json
+
+# 自动重启策略
+Restart=always
+RestartSec=5
+
+# 工作目录
+WorkingDirectory=/etc/kcp-afpacket
+
+# 用户和用户组（根据部署环境修改）
+# 注意：AF_PACKET 原始套接字需要 root 或 CAP_NET_RAW 权限
+# 如果二进制已通过 setcap 设置 capabilities，可以使用非特权用户
+# User=kcp
+# Group=kcp
+
+# ---- 安全加固 ----
+# 严格保护 /usr, /boot, /etc 为只读
+ProtectSystem=strict
+# 禁止进程获取新的特权（如通过 setuid 或 setcap）
+NoNewPrivileges=yes
+# 为 /tmp, /var/tmp 等目录创建独立的私有挂载命名空间
+PrivateTmp=yes
+# 限制地址空间为不可执行写入（W^X 策略）
+MemoryDenyWriteExecute=yes
+# 禁止系统调用中挂载点操作
+ProtectControlGroups=yes
+# 禁止修改内核可调参数
+ProtectKernelTunables=yes
+# 禁止加载内核模块
+ProtectKernelModules=yes
+
+# ---- 资源限制 ----
+# 限制最大文件描述符数量（每个通道需要若干 fd）
+LimitNOFILE=65536
+
+# ---- 日志 ----
+# 日志输出到 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kcp-afpacket
+
+[Install]
+# 在多用户系统启动时自动启用
+WantedBy=multi-user.target

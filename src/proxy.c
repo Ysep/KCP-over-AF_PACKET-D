@@ -7,6 +7,51 @@
  * 使用 edge-triggered epoll 进行高性能 I/O 事件处理。
  * 通过 ev.data.fd 存储文件描述符，proxy_find_channel_by_fd() 扫描哈希表查找通道。
  * TCP_NODELAY 确保低延迟，SO_REUSEADDR 支持快速重启。
+ *
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║                      Proxy 代理架构概览                                   ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                          ║
+ * ║   【Frontend 模式 — 面向客户端】                                          ║
+ * ║                                                                          ║
+ * ║   客户端 ──TCP/UDP──▶ [listen_fd] ──▶ KCP ──▶ AF_PACKET ──▶ 远端节点    ║
+ * ║              connect     accept       编码     原始套接字                 ║
+ * ║                                                                          ║
+ * ║   数据流方向:                                                             ║
+ * ║   客户端 → local_fd → proxy_handle_local_read() → channel_send_data()    ║
+ * ║         → kcp_wrap_send() → kcp_output_cb() → af_packet_send()           ║
+ * ║                                                                          ║
+ * ║   【Backend 模式 — 面向服务端】                                           ║
+ * ║                                                                          ║
+ * ║   AF_PACKET ──▶ channel_process_frame() ──▶ KCP ──▶ local_fd ──▶ 本地服务║
+ * ║   原始套接字     帧解析+解密               重组    connect    目标端口     ║
+ * ║                                                                          ║
+ * ║   数据流方向:                                                             ║
+ * ║   AF_PACKET → channel_process_frame() → kcp_wrap_input()                 ║
+ * ║            → kcp_wrap_recv() → proxy_write_to_local() → write()          ║
+ * ║                                                                          ║
+ * ║   【Epoll 事件循环】                                                      ║
+ * ║                                                                          ║
+ * ║   ┌──────────────────────────────────────────────────────────┐           ║
+ * ║   │              epoll_wait(timeout=10ms)                     │           ║
+ * ║   │                    │                                      │           ║
+ * ║   │       ┌────────────┼────────────┐                        │           ║
+ * ║   │       │            │            │                        │           ║
+ * ║   │   raw_sock     listen_fd    local_fd                     │           ║
+ * ║   │   (AF_PKT)    (新连接)    (数据I/O)                       │           ║
+ * ║   │       │            │            │                        │           ║
+ * ║   │   main.c      proxy_accept  proxy_handle_local_read      │           ║
+ * ║   │   帧解析      (仅TCP)       proxy_handle_local_write     │           ║
+ * ║   │       │            │            │                        │           ║
+ * ║   │   channel_      创建新      EPOLLIN: 读取→KCP            │           ║
+ * ║   │   process_      channel     EPOLLOUT: KCP→写入           │           ║
+ * ║   │   frame                                                      │           ║
+ * ║   └──────────────────────────────────────────────────────────┘           ║
+ * ║                                                                          ║
+ * ║   【IPv6 双栈支持】                                                       ║
+ * ║   优先尝试 IPv6 (AF_INET6)，失败回退 IPv4 (AF_INET)。                     ║
+ * ║   IPV6_V6ONLY=0 启用 IPv4 映射地址，实现双栈单套接字。                    ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 
 #ifndef _GNU_SOURCE

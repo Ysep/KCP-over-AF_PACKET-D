@@ -9,6 +9,24 @@
 // + Lightweight, distributed as a single source file.
 //
 //=====================================================================
+//
+// 【中文说明】
+// KCP 协议头文件 — 定义 KCP 控制块结构体和所有公开 API。
+// 本文件被 kcp_wrap.h 包含，通过 kcp_wrap_* 封装函数间接使用。
+//
+// 【核心类型】
+//   ikcpcb    — KCP 控制块 (KCP Control Block)，管理连接状态
+//   IKCPSEG   — KCP 数据段 (Segment)，内部传输基本单元
+//   IQUEUEHEAD — 双向循环链表节点，用于队列管理
+//
+// 【KCP 段结构 (wire format)】
+//   ┌────────┬─────┬─────┬─────┬──────┬──────┬──────┬──────┬──────────┐
+//   │ conv(4)│cmd(1)│frg(1)│wnd(2)│ts(4) │sn(4) │una(4)│len(4)│data(len) │
+//   └────────┴─────┴─────┴─────┴──────┴──────┴──────┴──────┴──────────┘
+//   总共 24 字节协议头 (IKCP_OVERHEAD) + 负载数据
+//   所有多字节字段使用小端序 (Little-Endian)
+//
+//=====================================================================
 #ifndef _IKCP_H_
 #define _IKCP_H_
 
@@ -18,7 +36,8 @@
 
 
 //=====================================================================
-// 32BIT INTEGER DEFINITION 
+// 32位整数定义 (32-bit Integer Definition)
+// 跨平台兼容: Windows / Linux / macOS / BSD
 //=====================================================================
 #ifndef __INTEGER_32_BITS__
 #define __INTEGER_32_BITS__
@@ -57,7 +76,11 @@
 
 
 //=====================================================================
-// Integer Definition
+// 整数类型定义 (Integer Type Definitions)
+//   IINT8/IUINT8:  8位  有符号/无符号整数
+//   IINT16/IUINT16: 16位 有符号/无符号整数
+//   IINT32/IUINT32: 32位 有符号/无符号整数
+//   IINT64/IUINT64: 64位 有符号/无符号整数
 //=====================================================================
 #ifndef __IINT8_DEFINED
 #define __IINT8_DEFINED
@@ -129,7 +152,18 @@ typedef unsigned long long IUINT64;
 
 
 //=====================================================================
-// QUEUE DEFINITION                                                  
+// 双向循环链表队列定义 (QUEUE DEFINITION)
+//
+// IQUEUEHEAD: 链表头/节点，包含 next/prev 指针
+// 基于 Linux 内核链表风格实现，通过宏 ICONTAINEROF 从节点指针
+// 反推包含它的结构体指针。
+//
+// 核心宏:
+//   IQUEUE_INIT(ptr)     — 初始化链表节点 (自环)
+//   IQUEUE_ADD(node,head) — 头部插入
+//   IQUEUE_ADD_TAIL       — 尾部插入
+//   IQUEUE_DEL(entry)     — 删除节点
+//   IQUEUE_ENTRY(ptr,type,member) — 从节点指针获取容器结构体
 //=====================================================================
 #ifndef __IQUEUE_DEF__
 #define __IQUEUE_DEF__
@@ -269,7 +303,22 @@ typedef struct IKCPCB ikcpcb;
 
 
 //=====================================================================
-// SEGMENT
+// KCP 数据段结构体 (SEGMENT)
+//
+// node:     链表节点 (IQUEUEHEAD)，用于挂载到队列
+// conv:     会话 ID
+// cmd:      命令类型 (PUSH/ACK/WASK/WINS)
+// frg:      分片序号 (0=最后一个分片)
+// wnd:      窗口大小 (对端可接收的窗口)
+// ts:       时间戳 (发送时的时间)
+// sn:       序列号 (递增)
+// una:      未确认序列号 (对端期望的下一个序列号)
+// len:      数据长度
+// resendts: 下次重传时间戳
+// rto:      重传超时 (RTO)
+// fastack:  快速确认计数 (用于触发快速重传)
+// xmit:     已传输次数
+// data[1]:  柔性数组成员，实际数据存储在此
 //=====================================================================
 struct IKCPSEG
 {
@@ -291,7 +340,18 @@ struct IKCPSEG
 
 
 //---------------------------------------------------------------------
-// IKCPOPS - pluggable congestion control operations
+// IKCPOPS - 可插拔拥塞控制操作 (Pluggable Congestion Control)
+//
+// 通过函数指针表实现可替换的拥塞控制算法。
+// 回调包括:
+//   init/release:  生命周期管理
+//   on_ack:        收到 ACK 时调用
+//   on_fast_retransmit: 快速重传时调用
+//   on_timeout:    超时时调用
+//   on_tick:       每个周期调用
+//   on_app_limited: 应用限速时调用
+//   on_rtt:        RTT 更新时调用
+//   on_pkt_sent/on_pkt_acked: 数据包发送/确认回调
 //---------------------------------------------------------------------
 struct IKCPOPS
 {
@@ -316,7 +376,27 @@ struct IKCPOPS
 
 
 //---------------------------------------------------------------------
-// IKCPCB
+// IKCPCB - KCP 控制块 (KCP Control Block)
+//
+// 核心状态变量:
+//   conv:      会话 ID
+//   mtu/mss:   最大传输单元 / 最大分段大小
+//   state:     连接状态 (0=正常, -1=死链)
+//   snd_una:   发送未确认 (最早的未确认序列号)
+//   snd_nxt:   下一个发送序列号
+//   rcv_nxt:   下一个期望接收序列号
+//   snd_wnd/rcv_wnd/rmt_wnd/cwnd: 发送/接收/远端/拥塞窗口
+//   rx_rttval/rx_srtt/rx_rto/rx_minrto: RTT 相关变量
+//
+// 队列:
+//   snd_queue: 发送队列 (应用层已入队，待发送)
+//   rcv_queue: 接收队列 (已完整接收，待应用层读取)
+//   snd_buf:   发送缓冲区 (已发送，等待确认)
+//   rcv_buf:   接收缓冲区 (已接收，等待重组)
+//
+// 回调:
+//   output:  输出回调 (KCP → 网络层)
+//   writelog: 日志回调 (可选)
 //---------------------------------------------------------------------
 struct IKCPCB
 {
@@ -370,76 +450,67 @@ extern "C" {
 #endif
 
 //---------------------------------------------------------------------
-// interface
+// KCP 公开 API 接口 (Public Interface)
 //---------------------------------------------------------------------
 
-// create a new kcp control object, 'conv' must be equal in both endpoints
-// of the same connection. 'user' will be passed to the output callback.
-// output callback can be set up like this: 'kcp->output = my_udp_output'
+/* 创建 KCP 实例: conv=会话ID, user=用户数据指针 (本项目中为 channel_t) */
 ikcpcb* ikcp_create(IUINT32 conv, void *user);
 
-// release kcp control object
+/* 销毁 KCP 实例，释放所有资源 */
 void ikcp_release(ikcpcb *kcp);
 
-// set output callback, which will be invoked by kcp
+/* 设置输出回调: KCP 需要发送数据时调用此回调 */
 void ikcp_setoutput(ikcpcb *kcp, int (*output)(const char *buf, int len, 
 	ikcpcb *kcp, void *user));
 
-// user/upper level recv: returns size, returns below zero for EAGAIN
+/* 从 KCP 接收数据 (KCP→应用层): 返回字节数, <0 表示无可用数据 (EAGAIN) */
 int ikcp_recv(ikcpcb *kcp, char *buffer, int len);
 
-// user/upper level send, returns below zero for error
+/* 发送数据到 KCP (应用层→KCP): 返回字节数, <0 表示错误 */
 int ikcp_send(ikcpcb *kcp, const char *buffer, int len);
 
-// update state (call it repeatedly, every 10ms-100ms), or you can ask 
-// ikcp_check when to call it again (without ikcp_input/_send calling).
-// 'current' - current timestamp in millisec. 
+/* 更新 KCP 状态机: 每 10ms-100ms 调用一次, current=当前毫秒时间戳 */
 void ikcp_update(ikcpcb *kcp, IUINT32 current);
 
-// Determines when you should invoke ikcp_update next:
-// returns the timestamp (in milliseconds) at which you should call
-// ikcp_update, assuming no ikcp_input/_send calls occur in between.
-// You can call ikcp_update at that time instead of calling it repeatedly.
-// Important for reducing unnecessary ikcp_update invocations. Use it to
-// schedule ikcp_update (e.g., implementing an epoll-like mechanism,
-// or optimizing ikcp_update when handling massive kcp connections).
+/* 计算下次调用 ikcp_update 的时间: 返回应调用的毫秒时间戳 */
 IUINT32 ikcp_check(const ikcpcb *kcp, IUINT32 current);
 
-// when you receive a low-level packet (e.g., UDP packet), call this
+/* 输入收到的原始数据段 (网络层→KCP) */
 int ikcp_input(ikcpcb *kcp, const char *data, long size);
 
-// flush pending data
+/* 刷新待发送数据: 将 snd_queue/buf 中的数据通过 output 回调发送 */
 void ikcp_flush(ikcpcb *kcp);
 
-// check the size of next message in the recv queue
+/* 查看接收队列中下一条完整消息的大小 */
 int ikcp_peeksize(const ikcpcb *kcp);
 
-// change MTU size, default is 1400
+/* 设置 MTU: 默认 1400, 范围 [50, 65535] */
 int ikcp_setmtu(ikcpcb *kcp, int mtu);
 
-// set maximum window size: sndwnd=32, rcvwnd=32 by default
+/* 设置发送/接收窗口大小: sndwnd/rcvwnd > 0 有效 */
 int ikcp_wndsize(ikcpcb *kcp, int sndwnd, int rcvwnd);
 
-// get how many packets are waiting to be sent
+/* 获取等待发送的段数 (nsnd_buf + nsnd_que) */
 int ikcp_waitsnd(const ikcpcb *kcp);
 
-// fastest: ikcp_nodelay(kcp, 1, 20, 2, 1)
-// nodelay: 0:disable (default), 1:enable
-// interval: internal update timer interval in ms, default is 100ms
-// resend: 0:disable fast resend (default), 1:enable fast resend
-// nc: 0:normal congestion control (default), 1:disable congestion control
+/* 配置 nodelay 模式:
+ *   nodelay:  0=普通 / 1=nodelay (更快, 更高带宽占用)
+ *   interval: 内部更新间隔 ms, 默认 100, 范围 [10, 5000]
+ *   resend:   快速重传阈值, 0=禁用, 默认 0
+ *   nc:       0=启用拥塞控制 / 1=禁用拥塞控制
+ *   最快配置: ikcp_nodelay(kcp, 1, 20, 2, 1) */
 int ikcp_nodelay(ikcpcb *kcp, int nodelay, int interval, int resend, int nc);
 
-// install congestion control algorithm, NULL restores builtin
+/* 安装可插拔拥塞控制算法: ops=NULL 恢复内置算法 */
 int ikcp_setcc(ikcpcb *kcp, const struct IKCPOPS *ops);
 
-// write log with kcp->writelog
+/* 写日志: mask=日志级别掩码组合 */
 void ikcp_log(ikcpcb *kcp, int mask, const char *fmt, ...);
 
-// setup allocator
+/* 设置自定义内存分配器 */
 void ikcp_allocator(void* (*new_malloc)(size_t), void (*new_free)(void*));
 
-// read conv
+/* 从原始数据包读取会话 ID (conv) */
 IUINT32 ikcp_getconv(const void *ptr);
 
 
