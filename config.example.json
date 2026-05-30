@@ -13,7 +13,7 @@
         "resend": 2,
         "nc": 1
     },
-    "proxy_mode": "forward",
+    "proxy_mode": "frontend",
     "max_channels": 256,
     "heartbeat_interval": 10,
     "heartbeat_timeout": 60,

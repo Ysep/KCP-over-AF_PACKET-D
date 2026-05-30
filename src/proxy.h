@@ -2,7 +2,7 @@
  * proxy.h - 代理模块
  *
  * 负责本地 TCP/UDP 端口的监听、连接和数据桥接。
- * 支持正向代理（监听本地→转发到远端）和反向代理（从 AF_PACKET 接收→连接本地服务）。
+ * 支持frontend代理（监听本地→转发到远端）和backend代理（从 AF_PACKET 接收→连接本地服务）。
  */
 
 #ifndef PROXY_H
@@ -44,7 +44,7 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch);
 int proxy_accept(global_ctx_t *ctx, channel_t *ch);
 
 /*
- * 连接到远端服务（反向代理模式）
+ * 连接到远端服务（backend代理模式）
  * @param ch 通道
  * @return   成功返回连接的 fd，失败返回 -1
  */
@@ -73,7 +73,7 @@ int proxy_handle_local_write(channel_t *ch);
 int proxy_flush_to_local(channel_t *ch);
 
 /*
- * 从通道接收数据并写入 KCP（KCP→应用方向完成后的反向路径）
+ * 从通道接收数据并写入 KCP（KCP→应用方向完成后的backend路径）
  * @param ch   通道
  * @param data 数据
  * @param len  数据长度

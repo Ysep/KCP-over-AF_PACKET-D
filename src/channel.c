@@ -655,10 +655,10 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 }
 
                 /* Set up local socket for the new responder channel.
-                 * Forward proxy: responder connects to remote service.
-                 * Reverse proxy: responder listens for local clients. */
-                if (g_ctx && g_ctx->config.proxy_mode == PROXY_MODE_FORWARD) {
-                    /* Forward: connect to remote_addr:remote_port */
+                 * Frontend proxy: responder connects to remote service.
+                 * Backend proxy: responder listens for local clients. */
+                if (g_ctx && g_ctx->config.proxy_mode == PROXY_MODE_FRONTEND) {
+                    /* Frontend: connect to remote_addr:remote_port */
                     if (proxy_connect_remote(ch) < 0) {
                         LOG_ERROR("Failed to connect remote for "
                                   "dynamic channel %u", ch->channel_id);
@@ -668,7 +668,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                         return -1;
                     }
                 } else if (g_ctx) {
-                    /* Reverse: start listening for local clients */
+                    /* Backend: start listening for local clients */
                     if (proxy_start_listen(g_ctx, ch) < 0) {
                         LOG_ERROR("Failed to start listen for "
                                   "dynamic channel %u", ch->channel_id);
@@ -727,8 +727,8 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                           "channel %u SYN_SENT → ESTABLISHED",
                           hdr->channel_id);
 
-                /* If we're a reverse proxy responder, connect to local service */
-                if (g_ctx && g_ctx->config.proxy_mode == PROXY_MODE_REVERSE &&
+                /* If we're a backend proxy responder, connect to local service */
+                if (g_ctx && g_ctx->config.proxy_mode == PROXY_MODE_BACKEND &&
                     ch->local_fd < 0) {
                     if (proxy_connect_remote(ch) < 0) {
                         LOG_ERROR("Failed to connect to remote service "

@@ -118,8 +118,8 @@ typedef enum {
 
 /* 代理模式 */
 typedef enum {
-    PROXY_MODE_FORWARD  = 0,    /* 正向代理：监听本地端口，转发到远端 */
-    PROXY_MODE_REVERSE  = 1     /* 反向代理：从 AF_PACKET 接收，转发到本地服务 */
+    PROXY_MODE_FRONTEND  = 0,    /* 前端代理：监听本地端口，转发到远端 */
+    PROXY_MODE_BACKEND   = 1     /* 后端代理：从 AF_PACKET 接收，转发到本地服务 */
 } proxy_mode_t;
 
 /* 加密模式 */
@@ -251,7 +251,7 @@ typedef struct channel_s {
 
     /* 本地套接字 */
     int             local_fd;           /* 连接到本地应用/服务的套接字 */
-    int             listen_fd;          /* 监听套接字（正向代理模式） */
+    int             listen_fd;          /* 监听套接字（frontend代理模式） */
     uint16_t        listen_port;        /* 监听端口 */
     uint16_t        remote_port;        /* 远端端口 */
     char            listen_addr[MAX_LISTEN_ADDR];  /* 监听地址 */

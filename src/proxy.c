@@ -2,7 +2,7 @@
  * proxy.c - 代理模块实现
  *
  * 负责本地 TCP/UDP 端口的监听、连接和数据桥接。
- * 支持正向代理（监听本地→转发到远端）和反向代理（从 AF_PACKET 接收→连接本地服务）。
+ * 支持frontend代理（监听本地→转发到远端）和backend代理（从 AF_PACKET 接收→连接本地服务）。
  *
  * 使用 edge-triggered epoll 进行高性能 I/O 事件处理。
  * 通过 ev.data.fd 存储文件描述符，proxy_find_channel_by_fd() 扫描哈希表查找通道。
@@ -441,7 +441,7 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
 }
 
 /*
- * 连接到远端服务（反向代理模式）
+ * 连接到远端服务（backend代理模式）
  */
 int proxy_connect_remote(channel_t *ch)
 {
@@ -518,7 +518,7 @@ int proxy_connect_remote(channel_t *ch)
 
     /*
      * 添加到 epoll。
-     * 包含 EPOLLOUT：反向连接建立后，通过 EPOLLOUT 事件确认连接就绪。
+     * 包含 EPOLLOUT：backend连接建立后，通过 EPOLLOUT 事件确认连接就绪。
      * 对于 TCP，connect 返回 EINPROGRESS 时，连接完成表现为套接字可写。
      */
     ev.events   = EPOLLIN | EPOLLOUT | EPOLLET;

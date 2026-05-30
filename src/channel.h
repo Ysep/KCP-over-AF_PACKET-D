@@ -33,7 +33,7 @@ void channel_shutdown(global_ctx_t *ctx);
  * @param ctx        全局上下文
  * @param channel_id 通道 ID
  * @param role       通道角色（发起方/响应方）
- * @param listen_port 监听端口（正向代理）
+ * @param listen_port 监听端口（frontend）
  * @param remote_port 远端端口
  * @param listen_addr 监听地址
  * @param remote_addr 远端地址
