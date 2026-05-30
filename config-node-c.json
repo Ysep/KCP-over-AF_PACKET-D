@@ -4,6 +4,7 @@
     "local_mac": "1a:af:4e:ed:9d:91",
     "peer_mac": "16:95:e8:30:eb:91",
     "nic_mtu": 1500,
+    "ethertype": 35013,
     "proxy_mode": "forward",
     "encryption": {
         "enabled": false,

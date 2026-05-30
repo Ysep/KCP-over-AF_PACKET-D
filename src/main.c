@@ -152,6 +152,8 @@ int config_load(const char *path, global_config_t *config)
     /* ---- ethertype ---- */
     if (json_object_object_get_ex(root, "ethertype", &tmp)) {
         config->ethertype = (uint16_t)json_object_get_int(tmp);
+    } else {
+        config->ethertype = 0x88B5;   /* 默认 EtherType */
     }
 
     /* ---- peer_mac ---- */
@@ -843,8 +845,8 @@ int main(int argc, char *argv[])
                             continue;
                         }
 
-                        /* CRC 校验 */
-                        if (ctx.config.crc_enabled) {
+                        /* CRC 校验（仅对数据帧；控制帧不带CRC） */
+                        if (ctx.config.crc_enabled && !IS_CTRL_FRAME(hdr.flags)) {
                             ssize_t data_len = myproto_verify_crc(buf, (size_t)len);
                             if (data_len < 0) {
                                 LOG_DEBUG("CRC verification failed for frame");
