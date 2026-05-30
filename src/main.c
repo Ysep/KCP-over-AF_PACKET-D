@@ -238,6 +238,8 @@ int config_load(const char *path, global_config_t *config)
         } else {
             config->proxy_mode = PROXY_MODE_FORWARD;
         }
+    } else {
+        config->proxy_mode = PROXY_MODE_FORWARD;
     }
 
     /* ---- max_channels ---- */
@@ -844,7 +846,8 @@ int main(int argc, char *argv[])
                     uint8_t  buf[AF_PACKET_FRAME_SIZE];
                     uint8_t  src_mac[ETH_MAC_ADDR_LEN];
                     uint8_t  dst_mac[ETH_MAC_ADDR_LEN];
-                    uint16_t ethtype;
+                    /* BPF ensures only our ethertype arrives, but keep param for defense-in-depth */
+                    uint16_t ethtype __attribute__((unused));
 
                     int frame_count = 0;
                     while (frame_count < MAX_FRAMES_PER_CYCLE) {

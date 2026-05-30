@@ -80,6 +80,11 @@ static size_t safe_strncpy(char *dst, const char *src, size_t dstsize)
  * af_packet_create
  * ============================================================================ */
 
+/*
+ * 注意: ethertype 参数必须是网络字节序 (big-endian)。
+ * 调用方应使用 htons() 转换。socket() 和 bind() 的内核 API
+ * 要求网络字节序的协议号。
+ */
 int af_packet_create(const char *if_name, uint16_t ethertype, int *ifindex)
 {
     int              sock = -1;
@@ -247,6 +252,8 @@ int af_packet_set_bpf(int sock, uint16_t ethertype)
 
 /* ============================================================================
  * af_packet_send
+ *
+ * ethertype 为网络字节序 (big-endian)
  * ============================================================================ */
 
 ssize_t af_packet_send(int sock, int ifindex,
@@ -307,8 +314,12 @@ ssize_t af_packet_send(int sock, int ifindex,
     /* 以太网头部：目标 MAC + 源 MAC + EtherType */
     memcpy(frame_buf, dst_mac, ETH_MAC_ADDR_LEN);
     memcpy(frame_buf + ETH_MAC_ADDR_LEN, src_mac, ETH_MAC_ADDR_LEN);
-    frame_buf[12] = (uint8_t)((ethertype >> 8) & 0xFF);
-    frame_buf[13] = (uint8_t)(ethertype & 0xFF);
+    /* ethertype 为网络字节序 (big-endian), 转为 host 序后再手动编码 */
+    {
+        uint16_t host_ethertype = ntohs(ethertype);
+        frame_buf[12] = (uint8_t)((host_ethertype >> 8) & 0xFF);
+        frame_buf[13] = (uint8_t)(host_ethertype & 0xFF);
+    }
 
     /* 负载 */
     if (payload && payload_len > 0) {

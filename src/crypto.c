@@ -296,11 +296,11 @@ int crypto_encrypt_frame(const uint8_t *in, int in_len,
     {
         int fd = open("/dev/urandom", O_RDONLY);
         if (fd < 0) return -1;
-        ssize_t total = 0;
-        while (total < SM4_IV_LEN) {
-            ssize_t n = read(fd, iv + total, SM4_IV_LEN - total);
+        ssize_t total_read = 0;
+        while (total_read < SM4_IV_LEN) {
+            ssize_t n = read(fd, iv + total_read, SM4_IV_LEN - total_read);
             if (n <= 0) { close(fd); return -1; }
-            total += n;
+            total_read += n;
         }
         close(fd);
     }

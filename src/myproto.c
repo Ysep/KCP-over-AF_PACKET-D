@@ -186,8 +186,9 @@ ssize_t myproto_build_frame(uint8_t *buf, size_t buf_size,
         memcpy(hdr_pos + 6, &net_data_len, 2);
     }
 
-    /* 复制负载数据 */
-    if (payload_len > 0) {
+    /* 复制负载数据（若 payload 已位于 buf+MYPROTO_HDR_SIZE 则跳过，
+     * 避免自重叠 memcpy — 加密路径下数据已由 crypto 模块原地写入） */
+    if (payload_len > 0 && payload != buf + MYPROTO_HDR_SIZE) {
         memcpy(buf + MYPROTO_HDR_SIZE, payload, payload_len);
     }
 

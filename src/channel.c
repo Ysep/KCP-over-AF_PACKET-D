@@ -670,6 +670,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                         return -1;
                     }
                 }
+            } else {
                 /* Channel found — validate state before accepting SYN.
                  * Reject SYN on closing/closed channels to prevent stale revival.
                  * SYN_SENT (peer's retransmission) and ESTABLISHED (race) are OK. */
@@ -1231,6 +1232,19 @@ void channel_timeout_check(global_ctx_t *ctx)
 
         while (ch) {
             channel_t *next = ch->hash_next;
+
+            /*
+             * 检查 0: CLOSED 僵尸通道清理
+             * 通道被创建但从未建立——立即销毁。
+             */
+            if (ch->state == CHANNEL_CLOSED) {
+                LOG_WARN("channel_timeout_check: zombie CLOSED channel %u "
+                         "detected, destroying", ch->channel_id);
+                channel_send_ctrl(ch, MPF_RST);
+                channel_destroy(ctx, ch);
+                ch = next;
+                continue;
+            }
 
             /*
              * 检查 1: 心跳超时

@@ -31,7 +31,8 @@
  *      (g_enc_ctx / g_dec_ctx)，避免密钥混淆。
  *   3. HMAC 密钥派生: HMAC 密钥从 SM4 密钥派生 (HMAC-SM3("KCP-HMAC", key))，
  *      确保即使 SM4 密钥暴露，攻击者也需要同时破解 HMAC。
- *   4. 时序安全: HMAC 校验使用常量时间比较，减少侧信道泄漏。
+ *   4. 时序安全: Encrypt-then-MAC 设计，HMAC 先验后解密，减少侧信道泄漏。
+ *      （memcmp 非恒定时间实现，LAN 场景下风险可控）
  *   5. 临时密钥擦除: crypto_init() 结束后 memset 清零 key_bin 栈内存。
  */
 

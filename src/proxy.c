@@ -540,6 +540,7 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                 LOG_INFO("proxy_handle_local_read: EOF on fd=%d "
                          "(channel=%u), starting graceful close",
                          ch->local_fd, ch->channel_id);
+                proxy_close_local(ch);
                 channel_send_ctrl(ch, MPF_FIN);
                 return 0;
             }
@@ -570,6 +571,8 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
         socklen_t          addr_len = sizeof(peer_addr);
 
         while (1) {
+            /* POSIX: addr_len 是值-结果参数，每次调用前必须重置 */
+            addr_len = sizeof(peer_addr);
             n = recvfrom(ch->local_fd, buf, sizeof(buf), 0,
                          (struct sockaddr *)&peer_addr, &addr_len);
             if (n < 0) {
@@ -990,6 +993,7 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
                       "(channel=%u, events=0x%x)",
                       fd, ch->channel_id, events);
             proxy_close_local(ch);
+            ch->state = CHANNEL_CLOSED;
             return -1;
         }
 
