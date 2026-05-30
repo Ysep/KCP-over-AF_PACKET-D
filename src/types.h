@@ -297,7 +297,7 @@ typedef struct {
 
     /* 通道管理 */
     channel_t     **channel_hash;                /* 通道哈希表（动态分配） */
-    uint16_t        channel_hash_size;           /* 哈希表桶数 */
+    uint32_t        channel_hash_size;           /* 哈希表桶数 */
     int             channel_count;               /* 当前活跃通道数 */
 
     /* epoll */

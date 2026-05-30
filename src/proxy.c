@@ -61,7 +61,7 @@ static global_ctx_t *g_ctx = NULL;
  */
 static channel_t *proxy_find_channel_by_fd(global_ctx_t *ctx, int fd)
 {
-    int i;
+    uint32_t i;
 
     if (!ctx || fd < 0) {
         return NULL;

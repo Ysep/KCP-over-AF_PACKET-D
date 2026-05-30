@@ -553,10 +553,13 @@ static void cleanup(global_ctx_t *ctx)
     if (ctx == NULL) return;
 
     channel_close_all(ctx);
-    /* Brief drain to flush KCP output buffers */
-    for (int i = 0; i < 20 && ctx->channel_count > 0; i++) {
-        channel_kcp_update(ctx);
-        usleep(50000);  /* 50ms */
+    /* Drain KCP buffers: allow in-flight data to flush during shutdown */
+    {
+        int drain_attempts;
+        for (drain_attempts = 0; drain_attempts < 20; drain_attempts++) {
+            channel_kcp_update(ctx);
+            usleep(10000);  /* 10ms */
+        }
     }
     channel_shutdown(ctx);
     proxy_shutdown(ctx);
@@ -599,6 +602,7 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     ctx->config.crc_enabled        = new_cfg.crc_enabled;
     ctx->config.heartbeat_interval = new_cfg.heartbeat_interval;
     ctx->config.heartbeat_timeout  = new_cfg.heartbeat_timeout;
+    /* Heartbeat params are read from g_ctx->config at check time (not cached per-channel) */
     ctx->config.kcp_nodelay        = new_cfg.kcp_nodelay;
     ctx->config.kcp_interval       = new_cfg.kcp_interval;
     ctx->config.kcp_resend         = new_cfg.kcp_resend;
@@ -607,7 +611,7 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     ctx->config.kcp_recv_window    = new_cfg.kcp_recv_window;
 
     /* Update KCP params on all existing channels */
-    for (int i = 0; i < ctx->channel_hash_size; i++) {
+    for (uint32_t i = 0; i < ctx->channel_hash_size; i++) {
         channel_t *ch = ctx->channel_hash[i];
         while (ch) {
             if (ch->kcp) {
@@ -959,13 +963,13 @@ int main(int argc, char *argv[])
                         }
 
                         /* MAC auto-learning: if peer_mac is broadcast, learn from first valid frame */
-                        if (ctx.peer_mac_learned == 0 && !mac_is_broadcast(src_mac)) {
+                        if (ctx.peer_mac_learned == 0 && !mac_is_broadcast(src_mac) && !mac_is_zero(src_mac)) {
                             memcpy(ctx.peer_mac, src_mac, ETH_MAC_ADDR_LEN);
                             ctx.peer_mac_learned = 1;
                             LOG_INFO("Auto-learned peer MAC: %02x:%02x:%02x:%02x:%02x:%02x",
                                      src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
                             /* Update all existing channels with learned MAC */
-                            for (int i = 0; i < ctx.channel_hash_size; i++) {
+                            for (uint32_t i = 0; i < ctx.channel_hash_size; i++) {
                                 channel_t *ch = ctx.channel_hash[i];
                                 while (ch) {
                                     memcpy(ch->peer_mac, ctx.peer_mac, ETH_MAC_ADDR_LEN);

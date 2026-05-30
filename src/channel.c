@@ -264,17 +264,17 @@ int channel_init(global_ctx_t *ctx, int max_channels)
     /* 保存全局上下文指针 */
     g_ctx = ctx;
 
-    /* 计算哈希表大小：max_channels * 2，限幅 [64, 65536] */
+    /* 计算哈希表大小：max_channels * 2，限幅 [64, 65535] */
     hash_size = (uint32_t)max_channels * 2;
     if (hash_size < 64) hash_size = 64;
-    if (hash_size > 65536) hash_size = 65536;
+    if (hash_size > 65535) hash_size = 65535;
 
     ctx->channel_hash = calloc(hash_size, sizeof(channel_t *));
     if (!ctx->channel_hash) {
         LOG_ERROR("channel_init: failed to allocate hash table (%u buckets)", hash_size);
         return -1;
     }
-    ctx->channel_hash_size = (uint16_t)hash_size;
+    ctx->channel_hash_size = hash_size;
 
     /* 重置通道计数 */
     ctx->channel_count = 0;
@@ -290,7 +290,7 @@ int channel_init(global_ctx_t *ctx, int max_channels)
  */
 void channel_shutdown(global_ctx_t *ctx)
 {
-    int i;
+    uint32_t i;
 
     if (!ctx) {
         LOG_ERROR("channel_shutdown: null ctx pointer");
@@ -681,7 +681,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
             } else {
                 /* Channel found — validate state before accepting SYN.
                  * Reject SYN on closing/closed channels to prevent stale revival.
-                 * SYN_SENT (peer's retransmission) and ESTABLISHED (race) are OK. */
+                 * SYN_SENT (peer's retransmission) is OK. */
                 if (ch->state == CHANNEL_FIN_SENT ||
                     ch->state == CHANNEL_FIN_RCVD ||
                     ch->state == CHANNEL_TIME_WAIT ||
@@ -689,6 +689,13 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                     LOG_WARN("channel_process_frame: "
                              "SYN for channel %u in closing state %d, ignoring",
                              hdr->channel_id, ch->state);
+                    return 0;
+                }
+                /* ESTABLISHED: duplicate SYN, ignore (already connected) */
+                if (ch->state == CHANNEL_ESTABLISHED) {
+                    LOG_DEBUG("channel_process_frame: "
+                              "ignoring duplicate SYN on ESTABLISHED channel %u",
+                              hdr->channel_id);
                     return 0;
                 }
             }
@@ -1130,7 +1137,7 @@ int channel_send_data(channel_t *ch, const uint8_t *data, size_t len)
  */
 void channel_heartbeat(global_ctx_t *ctx)
 {
-    int        i;
+    uint32_t   i;
     uint32_t   now;
     int        interval;
     int        global_hb_ok = 0;
@@ -1219,7 +1226,7 @@ void channel_heartbeat(global_ctx_t *ctx)
  */
 void channel_timeout_check(global_ctx_t *ctx)
 {
-    int        i;
+    uint32_t   i;
     uint32_t   now;
     int        hb_timeout;
 
@@ -1365,7 +1372,7 @@ void channel_timeout_check(global_ctx_t *ctx)
  */
 void channel_kcp_update(global_ctx_t *ctx)
 {
-    int      i;
+    uint32_t  i;
     IUINT32  current_ms;
 
     if (!ctx) {
@@ -1384,7 +1391,6 @@ void channel_kcp_update(global_ctx_t *ctx)
             if (ch->kcp) {
                 kcp_wrap_update(ch->kcp, current_ms);
             }
-
             ch = next;
         }
     }
@@ -1399,7 +1405,7 @@ void channel_kcp_update(global_ctx_t *ctx)
 void channel_foreach(global_ctx_t *ctx, channel_foreach_cb_t callback,
                      void *user_data)
 {
-    int i;
+    uint32_t i;
 
     if (!ctx) {
         LOG_ERROR("channel_foreach: null ctx pointer");
@@ -1444,7 +1450,7 @@ int channel_count(global_ctx_t *ctx)
  */
 void channel_close_all(global_ctx_t *ctx)
 {
-    int i;
+    uint32_t i;
 
     if (!ctx) {
         LOG_ERROR("channel_close_all: null ctx pointer");
