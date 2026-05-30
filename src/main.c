@@ -44,11 +44,9 @@ static void signal_handler(int signum)
     switch (signum) {
     case SIGINT:
     case SIGTERM:
-        LOG_INFO("Received signal %d, shutting down...", signum);
         g_ctx->running = 0;
         break;
     case SIGHUP:
-        LOG_INFO("Received SIGHUP, requesting config reload...");
         g_ctx->reload_requested = 1;
         break;
     default:
@@ -95,7 +93,7 @@ static int setup_signals(global_ctx_t *ctx)
 /* ---- MAC 地址解析 ---- */
 static int parse_mac_string(const char *str, uint8_t mac[ETH_MAC_ADDR_LEN])
 {
-    int values[ETH_MAC_ADDR_LEN];
+    unsigned int values[ETH_MAC_ADDR_LEN];
     int n;
 
     if (str == NULL || strlen(str) == 0)
@@ -108,7 +106,7 @@ static int parse_mac_string(const char *str, uint8_t mac[ETH_MAC_ADDR_LEN])
         return -1;
 
     for (int i = 0; i < ETH_MAC_ADDR_LEN; i++) {
-        if (values[i] < 0 || values[i] > 255)
+        if (values[i] > 255)
             return -1;
         mac[i] = (uint8_t)values[i];
     }
@@ -144,6 +142,7 @@ int config_load(const char *path, global_config_t *config)
     if (json_object_object_get_ex(root, "interface", &tmp)) {
         const char *s = json_object_get_string(tmp);
         if (s) {
+            /* strncpy with manual NUL termination is intentional */
             strncpy(config->interface, s, MAX_INTERFACE_NAME - 1);
             config->interface[MAX_INTERFACE_NAME - 1] = '\0';
         }
@@ -151,7 +150,12 @@ int config_load(const char *path, global_config_t *config)
 
     /* ---- ethertype ---- */
     if (json_object_object_get_ex(root, "ethertype", &tmp)) {
-        config->ethertype = (uint16_t)json_object_get_int(tmp);
+        int raw_ethertype = json_object_get_int(tmp);
+        if (raw_ethertype <= 0 || raw_ethertype > 0xFFFF) {
+            LOG_ERROR("Ethertype %d out of range [1, 65535]", raw_ethertype);
+            goto cleanup;
+        }
+        config->ethertype = (uint16_t)raw_ethertype;
     } else {
         config->ethertype = 0x88B5;   /* 默认 EtherType */
     }
@@ -272,6 +276,7 @@ int config_load(const char *path, global_config_t *config)
                               SM4_KEY_HEX_LEN, SM4_KEY_BIN_LEN);
                     goto cleanup;
                 }
+                /* strncpy with manual NUL termination is intentional */
                 strncpy(config->encryption.sm4_key, hex_key, SM4_KEY_HEX_LEN);
                 config->encryption.sm4_key[SM4_KEY_HEX_LEN] = '\0';
             }
@@ -301,6 +306,7 @@ int config_load(const char *path, global_config_t *config)
     if (json_object_object_get_ex(root, "pid_file", &tmp)) {
         const char *s = json_object_get_string(tmp);
         if (s) {
+            /* strncpy with manual NUL termination is intentional */
             strncpy(config->pid_file, s, MAX_PID_PATH - 1);
             config->pid_file[MAX_PID_PATH - 1] = '\0';
         }
@@ -310,12 +316,15 @@ int config_load(const char *path, global_config_t *config)
     if (json_object_object_get_ex(root, "instance_name", &tmp)) {
         const char *s = json_object_get_string(tmp);
         if (s) {
+            /* strncpy with manual NUL termination is intentional */
             strncpy(config->instance_name, s, MAX_LISTEN_ADDR - 1);
             config->instance_name[MAX_LISTEN_ADDR - 1] = '\0';
         } else {
+            /* strncpy with manual NUL termination is intentional */
             strncpy(config->instance_name, "default", MAX_LISTEN_ADDR - 1);
         }
     } else {
+        /* strncpy with manual NUL termination is intentional */
         strncpy(config->instance_name, "default", MAX_LISTEN_ADDR - 1);
     }
 
@@ -345,6 +354,7 @@ int config_load(const char *path, global_config_t *config)
             if (json_object_object_get_ex(ch_obj, "listen_addr", &tmp)) {
                 const char *s = json_object_get_string(tmp);
                 if (s) {
+                    /* strncpy with manual NUL termination is intentional */
                     strncpy(ch_cfg->listen_addr, s, MAX_LISTEN_ADDR - 1);
                     ch_cfg->listen_addr[MAX_LISTEN_ADDR - 1] = '\0';
                 }
@@ -353,6 +363,7 @@ int config_load(const char *path, global_config_t *config)
             if (json_object_object_get_ex(ch_obj, "remote_addr", &tmp)) {
                 const char *s = json_object_get_string(tmp);
                 if (s) {
+                    /* strncpy with manual NUL termination is intentional */
                     strncpy(ch_cfg->remote_addr, s, MAX_REMOTE_ADDR - 1);
                     ch_cfg->remote_addr[MAX_REMOTE_ADDR - 1] = '\0';
                 }
@@ -407,6 +418,22 @@ int validate_config(const global_config_t *config)
     }
     if (config->kcp_recv_window <= 0) {
         LOG_ERROR("kcp.rcvwnd must be > 0, got %d", config->kcp_recv_window);
+        return -1;
+    }
+    if (config->kcp_interval < 1 || config->kcp_interval > 500) {
+        LOG_ERROR("kcp.interval must be in [1, 500], got %d", config->kcp_interval);
+        return -1;
+    }
+    if (config->kcp_nodelay < 0 || config->kcp_nodelay > 1) {
+        LOG_ERROR("kcp.nodelay must be 0 or 1, got %d", config->kcp_nodelay);
+        return -1;
+    }
+    if (config->kcp_resend < 0 || config->kcp_resend > 10) {
+        LOG_ERROR("kcp.resend must be in [0, 10], got %d", config->kcp_resend);
+        return -1;
+    }
+    if (config->kcp_nc < 0 || config->kcp_nc > 1) {
+        LOG_ERROR("kcp.nc must be 0 or 1, got %d", config->kcp_nc);
         return -1;
     }
 
@@ -522,8 +549,8 @@ static void cleanup(global_ctx_t *ctx)
         usleep(50000);  /* 50ms */
     }
     channel_shutdown(ctx);
-    crypto_cleanup();
     proxy_shutdown(ctx);
+    crypto_cleanup();
 
     if (ctx->raw_sock >= 0) {
         af_packet_close(ctx->raw_sock);

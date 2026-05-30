@@ -164,12 +164,13 @@ ssize_t myproto_build_frame(uint8_t *buf, size_t buf_size,
         return -1;
     }
 
-    total_len = MYPROTO_HDR_SIZE + payload_len;
-    if (total_len > buf_size) {
+    if (payload_len > buf_size - MYPROTO_HDR_SIZE) {
         LOG_ERROR("myproto_build_frame: buffer too small "
-                  "(need %zu, have %zu)", total_len, buf_size);
+                  "(need %zu, have %zu)", MYPROTO_HDR_SIZE + payload_len, buf_size);
         return -1;
     }
+
+    total_len = MYPROTO_HDR_SIZE + payload_len;
 
     /* 写入 MyProto 协议头（网络字节序） */
     {
@@ -351,7 +352,7 @@ ssize_t myproto_build_data_frame(uint8_t *buf, size_t buf_size,
         return -1;
     }
 
-    if (channel_id >= MAX_CHANNELS) {
+    if (channel_id >= MAX_CHANNELS && channel_id != HEARTBEAT_CH_ID) {
         LOG_ERROR("myproto_build_data_frame: invalid channel_id %u "
                   "(max %u)", channel_id, MAX_CHANNELS);
         return -1;
@@ -359,6 +360,17 @@ ssize_t myproto_build_data_frame(uint8_t *buf, size_t buf_size,
 
     /* 加密路径：先将加密输出写入 buf+MYPROTO_HDR_SIZE，再构建帧头 */
     if (flags & MPF_CRYPTO) {
+        /* Pre-check buffer capacity: crypto may add up to CRYPTO_OVERHEAD bytes */
+        int max_crypto_len;
+        /* KCP data_len is bounded by KCP MTU (~1400), safe to cast to int */
+        max_crypto_len = (int)data_len + CRYPTO_OVERHEAD;
+        if (MYPROTO_HDR_SIZE + (size_t)max_crypto_len > buf_size) {
+            LOG_ERROR("myproto_build_data_frame: buffer too small for crypto "
+                      "(need at least %zu, have %zu)",
+                      MYPROTO_HDR_SIZE + (size_t)max_crypto_len, buf_size);
+            return -1;
+        }
+        /* Now safe to write */
         int crypto_len = crypto_encrypt_frame(data, (int)data_len,
                                                buf + MYPROTO_HDR_SIZE,
                                                (int)(buf_size - MYPROTO_HDR_SIZE));
@@ -471,7 +483,7 @@ ssize_t myproto_append_crc(uint8_t *buf, size_t frame_len, size_t buf_size)
         return -1;
     }
 
-    if (frame_len + CRC32_SIZE > buf_size) {
+    if (frame_len > buf_size - CRC32_SIZE) {
         LOG_ERROR("myproto_append_crc: buffer overflow "
                   "(frame_len=%zu + CRC=%u > buf_size=%zu)",
                   frame_len, CRC32_SIZE, buf_size);

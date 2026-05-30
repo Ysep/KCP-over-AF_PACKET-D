@@ -232,7 +232,7 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
          * 确保不会因 edge-triggered 而在高并发下丢失连接。
          */
         ev.events   = EPOLLIN;
-        ev.data.ptr = ch;
+        ev.data.fd  = fd;
         if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
             LOG_ERROR("proxy_start_listen: epoll_ctl(ADD, listen_fd=%d) "
                       "failed: %s", fd, strerror(errno));
@@ -472,7 +472,7 @@ int proxy_connect_remote(channel_t *ch)
      * 对于 TCP，connect 返回 EINPROGRESS 时，连接完成表现为套接字可写。
      */
     ev.events   = EPOLLIN | EPOLLOUT | EPOLLET;
-    ev.data.ptr = ch;
+    ev.data.fd  = fd;
     if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
         LOG_ERROR("proxy_connect_remote: epoll_ctl(ADD, fd=%d) failed: %s",
                   fd, strerror(errno));
@@ -562,35 +562,41 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
         }
     } else {
         /*
-         * UDP: 接收单个数据报。
-         * 使用 recvfrom 获取对端地址（可能用于后续 sendto）。
+         * UDP: loop to drain all available datagrams (edge-triggered).
+         * Under ET epoll, multiple datagrams arriving together would
+         * lose all but the first without this loop.
          */
         struct sockaddr_in peer_addr;
-        socklen_t          addrlen = sizeof(peer_addr);
+        socklen_t          addr_len = sizeof(peer_addr);
 
-        n = recvfrom(ch->local_fd, buf, sizeof(buf), 0,
-                     (struct sockaddr *)&peer_addr, &addrlen);
-        if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return 0;
+        while (1) {
+            n = recvfrom(ch->local_fd, buf, sizeof(buf), 0,
+                         (struct sockaddr *)&peer_addr, &addr_len);
+            if (n < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                }
+                if (errno == EINTR) {
+                    continue;
+                }
+                LOG_ERROR("proxy_handle_local_read: recvfrom(fd=%d) failed: %s "
+                          "(channel=%u)",
+                          ch->local_fd, strerror(errno), ch->channel_id);
+                return -1;
             }
-            if (errno == EINTR) {
-                return 0;
+            if (n == 0) {
+                break;
             }
-            LOG_ERROR("proxy_handle_local_read: recvfrom(fd=%d) failed: %s "
-                      "(channel=%u)",
-                      ch->local_fd, strerror(errno), ch->channel_id);
-            return -1;
-        }
 
-        total_read = (int)n;
+            total_read += (int)n;
 
-        /* 将数据报送入 KCP */
-        if (channel_send_data(ch, buf, (size_t)n) < 0) {
-            LOG_ERROR("proxy_handle_local_read: channel_send_data "
-                      "failed (channel=%u, len=%zd)",
-                      ch->channel_id, n);
-            return -1;
+            /* 将数据报送入 KCP */
+            if (channel_send_data(ch, buf, (size_t)n) < 0) {
+                LOG_ERROR("proxy_handle_local_read: channel_send_data "
+                          "failed (channel=%u, len=%zd)",
+                          ch->channel_id, n);
+                return -1;
+            }
         }
     }
 
@@ -647,6 +653,9 @@ int proxy_handle_local_write(channel_t *ch)
                 ch->recv_buf + nwritten,
                 (size_t)(ch->recv_buf_len - nwritten));
         ch->recv_buf_len -= (int)nwritten;
+
+        /* Re-arm EPOLLOUT for remaining data (edge-triggered won't fire again) */
+        proxy_epoll_mod_events(g_ctx, ch->local_fd, ch, proxy_get_events(ch));
 
         LOG_DEBUG("proxy_handle_local_write: partial write %zd/%d bytes "
                   "on fd=%d (channel=%u)",
@@ -1001,6 +1010,8 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
                       "(channel=%u, events=0x%x)",
                       fd, ch->channel_id, events);
             proxy_close_local(ch);
+            channel_send_ctrl(ch, MPF_RST);
+            ch->state = CHANNEL_CLOSED;
             return -1;
         }
 
@@ -1102,8 +1113,7 @@ int proxy_epoll_del(global_ctx_t *ctx, int fd)
 
     /*
      * epoll_ctl(EPOLL_CTL_DEL) 在较新的内核上不需要 event 参数，
-     * 但为了兼容性，传入 NULL 可能在某些旧内核上失败。
-     * 传入一个清零的 event 结构体更安全。
+     * 内核 2.6.9+ 允许 NULL，会忽略 fd。
      */
     if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_DEL, fd, NULL) < 0) {
         /*

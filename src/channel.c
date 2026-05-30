@@ -507,7 +507,13 @@ void channel_destroy(global_ctx_t *ctx, channel_t *ch)
         ch->kcp = NULL;
     }
 
-    /* 关闭本地连接套接字 */
+    /*
+     * 关闭本地连接套接字。
+     * 注意：proxy_close_local() 内部通过 proxy.c 模块自身的
+     * static g_ctx 引用全局上下文（用于 epoll 操作），
+     * 而非通过参数传入 ctx。这是 proxy 模块的设计约定，
+     * 与 channel_destroy 的 ctx 形参最终指向同一 global_ctx_t。
+     */
     if (ch->local_fd >= 0) {
         proxy_close_local(ch);
         ch->local_fd = -1;
@@ -788,11 +794,13 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 return -1;
             }
 
-            /* 回复 PONG */
-            if (channel_send_ctrl(ch, MPF_PONG) != 0) {
-                LOG_ERROR("channel_process_frame: "
-                          "failed to send PONG for channel %u",
-                          hdr->channel_id);
+            /* 仅对已建立连接的通道回复 PONG */
+            if (ch->state == CHANNEL_ESTABLISHED) {
+                if (channel_send_ctrl(ch, MPF_PONG) != 0) {
+                    LOG_ERROR("channel_process_frame: "
+                              "failed to send PONG for channel %u",
+                              hdr->channel_id);
+                }
             }
 
             ch->last_peer_seen = now;
@@ -830,9 +838,6 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
      * 数据帧处理
      * ======================================================================== */
     if (IS_DATA_FRAME(hdr->flags)) {
-        uint8_t *decrypted_payload;
-        size_t   decrypted_len;
-        int      ret;
 
         LOG_DEBUG("channel_process_frame: DATA (channel=%u, len=%zu, "
                   "flags=0x%02x)",
@@ -852,64 +857,77 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
          */
         ch->last_peer_seen = now;
 
-        /* 处理加密数据帧 */
-        if (IS_CRYPTO_FRAME(hdr->flags)) {
-            /*
-             * myproto_process_data_frame 原地解密/验证，
-             * 但 payload 是 const 指针。
-             * 我们需要一个可变副本。
-             */
+        /*
+         * 使用栈缓冲区进行加解密，不使用 recv_buf。
+         * recv_buf 仅用于 proxy_write_to_local /
+         * proxy_handle_local_write 的待发送数据缓冲区，
+         * 与 crypto 解密缓冲区职责分离，避免冲突。
+         */
+        {
+            uint8_t        decrypt_buf[CHANNEL_RECV_BUF_SIZE];
+            const uint8_t *kcp_input_data = payload;
+            size_t         kcp_input_len  = payload_len;
+            int            ret;
 
-            if (payload_len > CHANNEL_RECV_BUF_SIZE) {
-                LOG_ERROR("channel_process_frame: "
-                          "payload too large for crypto processing "
-                          "(channel=%u, len=%zu, max=%d)",
-                          hdr->channel_id, payload_len,
-                          CHANNEL_RECV_BUF_SIZE);
-                ch->stats.crypto_errors++;
-                ch->stats.rx_errors++;
-                return -1;
+            /* 处理加密数据帧 */
+            if (IS_CRYPTO_FRAME(hdr->flags)) {
+                size_t decrypted_len = payload_len;
+
+                if (payload_len > sizeof(decrypt_buf)) {
+                    LOG_ERROR("channel_process_frame: "
+                              "payload too large for crypto processing "
+                              "(channel=%u, len=%zu, max=%zu)",
+                              hdr->channel_id, payload_len,
+                              sizeof(decrypt_buf));
+                    ch->stats.crypto_errors++;
+                    ch->stats.rx_errors++;
+                    return -1;
+                }
+
+                /*
+                 * 复制 payload 到栈上的可写缓冲区，
+                 * 并使用可变协议头副本，避免丢弃 const。
+                 */
+                memcpy(decrypt_buf, payload, payload_len);
+
+                {
+                    myproto_hdr_t mutable_hdr = *hdr;
+
+                    ret = myproto_process_data_frame(&mutable_hdr,
+                                                     decrypt_buf,
+                                                     &decrypted_len);
+                }
+
+                if (ret != 0) {
+                    LOG_ERROR("channel_process_frame: "
+                              "crypto processing failed for channel %u",
+                              hdr->channel_id);
+                    ch->stats.crypto_errors++;
+                    ch->stats.rx_errors++;
+                    return -1;
+                }
+
+                kcp_input_data = decrypt_buf;
+                kcp_input_len  = decrypted_len;
             }
 
-            /* 复制 payload 到可写缓冲区 */
-            memcpy(ch->recv_buf, payload, payload_len);
-            decrypted_len = payload_len;
+            /* 更新接收统计 */
+            ch->stats.rx_frames++;
+            ch->stats.rx_bytes += (uint64_t)kcp_input_len;
 
-            ret = myproto_process_data_frame(
-                (myproto_hdr_t *)hdr, /* 丢弃 const，仅用于标志更新 */
-                ch->recv_buf,
-                &decrypted_len);
-
+            /*
+             * 将数据输入 KCP。
+             * KCP 负责重组分片、排序和可靠交付。
+             */
+            ret = kcp_wrap_input(ch->kcp, kcp_input_data,
+                                 (int)kcp_input_len);
             if (ret != 0) {
                 LOG_ERROR("channel_process_frame: "
-                          "crypto processing failed for channel %u",
-                          hdr->channel_id);
-                ch->stats.crypto_errors++;
+                          "kcp_wrap_input failed for channel %u (len=%zu)",
+                          hdr->channel_id, kcp_input_len);
                 ch->stats.rx_errors++;
                 return -1;
             }
-
-            decrypted_payload = ch->recv_buf;
-            payload_len       = decrypted_len;
-        } else {
-            decrypted_payload = (uint8_t *)payload;
-        }
-
-        /* 更新接收统计 */
-        ch->stats.rx_frames++;
-        ch->stats.rx_bytes += (uint64_t)payload_len;
-
-        /*
-         * 将数据输入 KCP。
-         * KCP 负责重组分片、排序和可靠交付。
-         */
-        ret = kcp_wrap_input(ch->kcp, decrypted_payload, (int)payload_len);
-        if (ret != 0) {
-            LOG_ERROR("channel_process_frame: "
-                      "kcp_wrap_input failed for channel %u (len=%zu)",
-                      hdr->channel_id, payload_len);
-            ch->stats.rx_errors++;
-            return -1;
         }
 
         /*
@@ -1061,6 +1079,9 @@ int channel_send_data(channel_t *ch, const uint8_t *data, size_t len)
         return -1;
     }
 
+    /* 更新最后活跃时间（数据入队即视为活跃） */
+    ch->last_active = time_now();
+
     /*
      * 注意：此处不更新 tx_frames/tx_bytes 统计，
      * 因为这些统计在 kcp_output_cb 中由实际发送时更新。
@@ -1106,22 +1127,18 @@ void channel_heartbeat(global_ctx_t *ctx)
      * 则标记为成功，跳过逐通道心跳。
      */
     if (time_elapsed(ctx->last_global_heartbeat) < (uint32_t)interval) {
+        /* 最近 interval 秒内收到过全局 PONG，对端存活确认 */
         global_hb_ok = 1;
     } else {
-        /* 发送全局 PING */
+        /* 发送全局 PING，但不立即设置 global_hb_ok——
+         * 等待对端回复 PONG 后由 channel_process_frame
+         * 更新 last_global_heartbeat，下次心跳检查时生效。
+         * 在此期间逐通道心跳作为后备继续工作。 */
         LOG_DEBUG("channel_heartbeat: sending global PING on channel 0x%04X "
                   "(now=%u, last_global=%u, elapsed=%u)",
                   HEARTBEAT_CH_ID, now, ctx->last_global_heartbeat,
                   time_elapsed(ctx->last_global_heartbeat));
-        if (channel_send_heartbeat_ctrl(ctx, MPF_PING) == 0) {
-            /*
-             * 如果最近 interval 秒内收到过全局心跳响应，
-             * 标记为成功；否则继续逐通道心跳作为后备。
-             */
-            if (time_elapsed(ctx->last_global_heartbeat) < (uint32_t)interval) {
-                global_hb_ok = 1;
-            }
-        }
+        channel_send_heartbeat_ctrl(ctx, MPF_PING);
     }
 
     /*

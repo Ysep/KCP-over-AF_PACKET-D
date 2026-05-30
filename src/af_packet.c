@@ -421,9 +421,10 @@ ssize_t af_packet_recv(int sock, uint8_t *buf, size_t buf_size,
 
     /* --- 将负载复制到调用者缓冲区 --- */
     if (payload_len > buf_size) {
-        LOG_ERROR("af_packet_recv: payload length %zu exceeds caller "
-                  "buffer %zu, truncating", payload_len, buf_size);
-        payload_len = buf_size;
+        LOG_ERROR("af_packet_recv: payload length %zu exceeds caller buffer %zu",
+                  payload_len, buf_size);
+        errno = EMSGSIZE;
+        return -1;
     }
 
     if (payload_len > 0) {
@@ -637,6 +638,8 @@ int af_packet_get_mtu(int sock, const char *if_name)
 
 /* ============================================================================
  * af_packet_detect_conflict
+ *
+ * TODO: Call in main.c before af_packet_create
  * ============================================================================ */
 
 int af_packet_detect_conflict(const char *if_name, uint16_t ethertype)

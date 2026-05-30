@@ -36,7 +36,7 @@
 
 /* 判断帧类型 */
 #define IS_CTRL_FRAME(flags)    ((flags) & MPF_CTRL_MASK)
-#define IS_DATA_FRAME(flags)    ((flags) == MPF_DATA || ((flags) & MPF_CRYPTO))
+#define IS_DATA_FRAME(flags)    (((flags) & MPF_CTRL_MASK) == 0)
 #define IS_CRYPTO_FRAME(flags)  ((flags) & MPF_CRYPTO)
 
 /* 以太网帧常量 */
@@ -125,7 +125,7 @@ typedef enum {
 /* 加密模式 */
 typedef enum {
     CRYPTO_MODE_NONE    = 0,    /* 不加密 */
-    CRYPTO_MODE_SM4_SM3 = 1     /* SM4-CTR 加密 + SM3-HMAC 完整性校验 */
+    CRYPTO_MODE_SM4_SM3 = 1     /* SM4-CBC 加密 + SM3-HMAC 完整性校验 */
 } crypto_mode_t;
 
 /* ============================================================================

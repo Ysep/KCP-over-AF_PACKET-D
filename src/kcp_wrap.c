@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <time.h>
 
 /* --------------------------------------------------------------------------
@@ -73,11 +74,11 @@ void kcp_wrap_destroy(struct IKCPCB *kcp)
  * KCP 内部的 output 回调签名为:
  *   int (*)(const char *buf, int len, struct IKCPCB *kcp, void *user)
  *
- * 本模块对外暴露的回调签名为:
- *   int (*)(const char *buf, int len, void *user)
+ * 本模块对外暴露的回调签名（kcp_output_cb_t）同为 4 参数:
+ *   int (*)(const char *buf, int len, struct IKCPCB *kcp, void *user)
  *
- * 二者仅在参数数量上不同，通过强制类型转换适配。调用方通过
- * ikcp_create() 时传入的 user 指针即可在回调中获取 channel_t 上下文。
+ * 两者完全一致，无需适配。调用方通过 ikcp_create() 时传入的
+ * user 指针即可在回调中获取 channel_t 上下文。
  */
 void kcp_wrap_set_output(struct IKCPCB *kcp, kcp_output_cb_t cb)
 {
@@ -317,10 +318,10 @@ IUINT32 kcp_wrap_clock(void)
     struct timespec ts;
 
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
-        LOG_ERROR("kcp_wrap_clock: clock_gettime(CLOCK_MONOTONIC) failed: %s",
-                  strerror(errno));
-        /* 尽力回退：返回 0 让调用方继续运行 */
-        return 0;
+        /* Fallback: use gettimeofday if CLOCK_MONOTONIC unavailable */
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        return (IUINT32)(tv.tv_sec * 1000 + tv.tv_usec / 1000);
     }
 
     return (IUINT32)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);

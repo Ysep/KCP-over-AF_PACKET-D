@@ -27,6 +27,7 @@
  */
 
 #include "crypto.h"
+#include <limits.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -72,8 +73,17 @@ int crypto_init(const encryption_config_t *cfg)
     uint8_t key_bin[16];
     for (int i = 0; i < 16; i++) {
         unsigned int b;
-        sscanf(cfg->sm4_key + i * 2, "%2x", &b);
+        if (sscanf(cfg->sm4_key + i * 2, "%2x", &b) != 1) {
+            LOG_ERROR("crypto_init: invalid hex key at position %d", i * 2);
+            return -1;
+        }
         key_bin[i] = (uint8_t)b;
+    }
+    /* Verify key is exactly 32 hex chars */
+    if (cfg->sm4_key[32] != '\0') {
+        LOG_ERROR("crypto_init: key must be exactly 32 hex characters");
+        memset(key_bin, 0, sizeof(key_bin));
+        return -1;
     }
 
     sm4_set_encrypt_key(&g_enc_ctx, key_bin);
@@ -90,6 +100,7 @@ int crypto_init(const encryption_config_t *cfg)
 
     /* 擦除临时 key：防止通过 core dump / /proc/pid/mem 泄露 */
     memset(key_bin, 0, sizeof(key_bin));
+    __asm__ __volatile__("" : : "r"(key_bin) : "memory");
     return 0;
 }
 
@@ -145,10 +156,11 @@ static int sm4_cbc_encrypt(const uint8_t *key __attribute__((unused)),
     /* PKCS7 padding: 填充字节数 ∈ [1, 16]
      * pad = 16 - (in_len % 16)，当 in_len 恰好为 16 倍数时 pad=16 */
     int pad = SM4_IV_LEN - (in_len % SM4_IV_LEN);
+    if (in_len > INT_MAX - SM4_IV_SIZE) return -1;
     int padded_len = in_len + pad;
 
     /* 构造填充后的临时缓冲区：原始数据 + 填充字节（每字节值为 pad） */
-    uint8_t buf[padded_len];
+    uint8_t buf[MAX_FRAME_SIZE];  /* Safe: padded_len ≤ in_len+16 ≤ MAX_FRAME_SIZE */
     memcpy(buf, in, in_len);
     memset(buf + in_len, pad, pad);
 
@@ -270,6 +282,7 @@ int crypto_encrypt_frame(const uint8_t *in, int in_len,
 
     /* 估算总长度: IV(16) + 密文(≤in_len+16) + HMAC(32)
      * 最坏情况：明文已是 16 倍数，PKCS7 追加完整一个 block (16 字节) */
+    if (in_len > INT_MAX - SM4_IV_SIZE) return -1;
     int max_ct = in_len + SM4_IV_LEN;
     int total = SM4_IV_LEN + max_ct + SM3_HMAC_LEN;
     if (total > out_cap) return -1;
@@ -283,9 +296,13 @@ int crypto_encrypt_frame(const uint8_t *in, int in_len,
     {
         int fd = open("/dev/urandom", O_RDONLY);
         if (fd < 0) return -1;
-        ssize_t n = read(fd, iv, SM4_IV_LEN);
+        ssize_t total = 0;
+        while (total < SM4_IV_LEN) {
+            ssize_t n = read(fd, iv + total, SM4_IV_LEN - total);
+            if (n <= 0) { close(fd); return -1; }
+            total += n;
+        }
         close(fd);
-        if (n != SM4_IV_LEN) return -1;
     }
     memcpy(out, iv, SM4_IV_LEN);
 
