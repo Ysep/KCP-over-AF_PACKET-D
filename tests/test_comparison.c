@@ -108,7 +108,7 @@ static void init_minimal_ctx(void)
     g_ctx.config.kcp_interval       = KCP_INTERVAL;
     g_ctx.config.kcp_resend         = KCP_RESEND;
     g_ctx.config.kcp_nc             = KCP_NC;
-    g_ctx.config.proxy_mode         = PROXY_MODE_FORWARD;
+    g_ctx.config.node_type         = NODE_TYPE_FRONTEND;
     g_ctx.config.max_channels       = MAX_CHANNELS;
     g_ctx.config.heartbeat_interval = HEARTBEAT_INTERVAL;
     g_ctx.config.heartbeat_timeout  = HEARTBEAT_TIMEOUT;
@@ -868,7 +868,7 @@ static void test_channel_init_empty(void)
 
     /* B: channel_init_all(); ASSERT_NULL(channel_find(0)); ASSERT_NULL(channel_find(42)); */
     init_minimal_ctx();
-    CHECK(channel_init(&g_ctx) == 0, "channel_init failed");
+    CHECK(channel_init(&g_ctx, 256) == 0, "channel_init failed");
 
     CHECK(channel_find(&g_ctx, 0) == NULL, "channel_find(0) should be NULL");
     CHECK(channel_find(&g_ctx, 42) == NULL, "channel_find(42) should be NULL");
@@ -890,7 +890,7 @@ static void test_channel_create_and_find(void)
      *       channel_find(10)=found, channel_find(99)=NULL */
 
     init_minimal_ctx();
-    CHECK(channel_init(&g_ctx) == 0, "channel_init failed");
+    CHECK(channel_init(&g_ctx, 256) == 0, "channel_init failed");
 
     /* Use RESPONDER role to avoid SYN send on dummy socket */
     channel_t *ch = channel_create(&g_ctx, 10, CHANNEL_ROLE_RESPONDER,
@@ -928,7 +928,7 @@ static void test_channel_destroy_and_recreate(void)
 
     /* B: free+reuse same slot. A: heap alloc → different memory. */
     init_minimal_ctx();
-    CHECK(channel_init(&g_ctx) == 0, "channel_init failed");
+    CHECK(channel_init(&g_ctx, 256) == 0, "channel_init failed");
 
     channel_t *ch1 = channel_create(&g_ctx, 1, CHANNEL_ROLE_RESPONDER,
                                     1111, 111, "127.0.0.1", "127.0.0.1", 1);
@@ -982,7 +982,7 @@ static void test_channel_syn_established(void)
      * We test that channel_create sets up KCP correctly. */
 
     init_minimal_ctx();
-    CHECK(channel_init(&g_ctx) == 0, "channel_init failed");
+    CHECK(channel_init(&g_ctx, 256) == 0, "channel_init failed");
 
     /* B uses channel 100 for SYN→ESTABLISHED test */
     channel_t *ch100 = channel_create(&g_ctx, 100, CHANNEL_ROLE_RESPONDER,
@@ -1053,7 +1053,7 @@ static void test_channel_rst_and_close_all(void)
     TEST("Channel RST + close_all (B ch tests #7, #9)");
 
     init_minimal_ctx();
-    CHECK(channel_init(&g_ctx) == 0, "channel_init failed");
+    CHECK(channel_init(&g_ctx, 256) == 0, "channel_init failed");
 
     /* B test #7: RST → channel released immediately.
      * A: channel_destroy removes from hash and frees. */
@@ -1112,7 +1112,7 @@ static void test_channel_slots_exhausted(void)
     init_minimal_ctx();
     /* Lower max_channels for quick testing */
     g_ctx.config.max_channels = 5;
-    CHECK(channel_init(&g_ctx) == 0, "channel_init failed");
+    CHECK(channel_init(&g_ctx, 256) == 0, "channel_init failed");
 
     int i;
     for (i = 0; i < 5; i++) {
@@ -1151,7 +1151,7 @@ static void test_channel_kcp_instance(void)
     TEST("Channel KCP instance (B ch test #10)");
 
     init_minimal_ctx();
-    CHECK(channel_init(&g_ctx) == 0, "channel_init failed");
+    CHECK(channel_init(&g_ctx, 256) == 0, "channel_init failed");
 
     /* B uses channel 600 */
     channel_t *ch600 = channel_create(&g_ctx, 600, CHANNEL_ROLE_RESPONDER,

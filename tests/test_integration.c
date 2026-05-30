@@ -121,7 +121,7 @@ static void init_minimal_ctx(global_ctx_t *ctx)
     ctx->config.kcp_interval       = KCP_INTERVAL;
     ctx->config.kcp_resend         = KCP_RESEND;
     ctx->config.kcp_nc             = KCP_NC;
-    ctx->config.proxy_mode         = PROXY_MODE_FORWARD;
+    ctx->config.node_type         = NODE_TYPE_FRONTEND;
     ctx->config.max_channels       = MAX_CHANNELS;
     ctx->config.heartbeat_interval = HEARTBEAT_INTERVAL;
     ctx->config.heartbeat_timeout  = HEARTBEAT_TIMEOUT;
@@ -154,7 +154,7 @@ static void test_config_load_valid(void)
         "  \"ethertype\": 35013,"
         "  \"peer_mac\": \"aa:bb:cc:dd:ee:ff\","
         "  \"local_mac\": \"11:22:33:44:55:66\","
-        "  \"proxy_mode\": \"forward\","
+        "  \"node_type\": \"frontend\","
         "  \"max_channels\": 128,"
         "  \"crc_enabled\": true,"
         "  \"auto_set_nic_mtu\": false,"
@@ -209,8 +209,8 @@ static void test_config_load_valid(void)
           "crc_enabled mismatch");
     CHECK(cfg.max_channels == 128,
           "max_channels mismatch");
-    CHECK(cfg.proxy_mode == PROXY_MODE_FORWARD,
-          "proxy_mode mismatch");
+    CHECK(cfg.node_type == NODE_TYPE_FRONTEND,
+          "node_type mismatch");
 
     /* 验证 KCP 参数 */
     CHECK(cfg.kcp_mtu == 1400,          "kcp_mtu mismatch");
@@ -286,9 +286,9 @@ static void test_config_with_defaults(void)
           "default kcp_send_window mismatch");
     CHECK(cfg.kcp_recv_window == KCP_RECV_WINDOW,
           "default kcp_recv_window mismatch");
-    CHECK(cfg.proxy_mode == PROXY_MODE_FORWARD,
-          "default proxy_mode mismatch");
-    CHECK(cfg.max_channels == MAX_CHANNELS,
+    CHECK(cfg.node_type == NODE_TYPE_FRONTEND,
+          "default node_type mismatch");
+    CHECK(cfg.max_channels == 256,
           "default max_channels mismatch");
     CHECK(cfg.crc_enabled == 0,
           "default crc_enabled should be 0");
@@ -304,7 +304,7 @@ cleanup:
     unlink(tmp_path);
 }
 
-static void test_config_load_reverse_proxy_mode(void)
+static void test_config_load_reverse_node_type(void)
 {
     TEST("config_load: reverse 代理模式解析");
 
@@ -312,7 +312,7 @@ static void test_config_load_reverse_proxy_mode(void)
         "{"
         "  \"interface\": \"eth0\","
         "  \"ethertype\": 35013,"
-        "  \"proxy_mode\": \"reverse\","
+        "  \"node_type\": \"backend\","
         "  \"channels\": ["
         "    {"
         "      \"channel_id\": 1,"
@@ -333,8 +333,8 @@ static void test_config_load_reverse_proxy_mode(void)
     int ret = config_load(tmp_path, &cfg);
 
     CHECK(ret == 0, "config_load failed");
-    CHECK(cfg.proxy_mode == PROXY_MODE_REVERSE,
-          "proxy_mode should be PROXY_MODE_REVERSE");
+    CHECK(cfg.node_type == NODE_TYPE_BACKEND,
+          "node_type should be NODE_TYPE_BACKEND");
 
     unlink(tmp_path);
     PASS();
@@ -594,7 +594,7 @@ static void test_channel_hash_operations(void)
     global_ctx_t ctx;
     init_minimal_ctx(&ctx);
 
-    int ret = channel_init(&ctx);
+    int ret = channel_init(&ctx, 256);
     CHECK(ret == 0, "channel_init failed");
     CHECK(ctx.channel_count == 0, "initial channel_count should be 0");
     CHECK(channel_count(&ctx) == 0, "channel_count() should return 0");
@@ -674,7 +674,7 @@ static void test_channel_hash_collision_handling(void)
     global_ctx_t ctx;
     init_minimal_ctx(&ctx);
 
-    int ret = channel_init(&ctx);
+    int ret = channel_init(&ctx, 256);
     CHECK(ret == 0, "channel_init failed");
 
     /*
@@ -781,7 +781,7 @@ static void test_syn_frame_routing(void)
     ctx.config.channels[0].enabled = 1;
     ctx.config.channel_count        = 1;
 
-    int ret = channel_init(&ctx);
+    int ret = channel_init(&ctx, 256);
     CHECK(ret == 0, "channel_init failed");
     CHECK(channel_count(&ctx) == 0, "initial count should be 0");
 
@@ -933,6 +933,8 @@ static void test_config_validation_ethertype_boundary(void)
     cfg.kcp_mtu                  = KCP_MTU_CONSERVATIVE;
     cfg.kcp_send_window          = KCP_SEND_WINDOW;
     cfg.kcp_recv_window          = KCP_RECV_WINDOW;
+    cfg.kcp_interval             = KCP_INTERVAL;
+    cfg.kcp_resend               = KCP_RESEND;
     int ret = validate_config(&cfg);
     CHECK(ret == 0, "0x0600 should be valid ethertype");
     PASS(); return;
@@ -1151,6 +1153,8 @@ static void test_config_validation_crypto_enabled_no_key(void)
     cfg.kcp_send_window    = KCP_SEND_WINDOW;
     cfg.kcp_recv_window    = KCP_RECV_WINDOW;
     cfg.max_channels       = MAX_CHANNELS;
+    cfg.kcp_interval    = KCP_INTERVAL;
+    cfg.kcp_resend      = KCP_RESEND;
     cfg.encryption.enabled = 1;
     /* sm4_key 全 0 — 应被拒绝 */
     cfg.channels[0].channel_id  = 1;
@@ -1174,6 +1178,8 @@ static void test_config_validation_crypto_valid_key(void)
     cfg.kcp_send_window    = KCP_SEND_WINDOW;
     cfg.kcp_recv_window    = KCP_RECV_WINDOW;
     cfg.max_channels       = MAX_CHANNELS;
+    cfg.kcp_interval    = KCP_INTERVAL;
+    cfg.kcp_resend      = KCP_RESEND;
     cfg.encryption.enabled = 1;
     /* 填入 hex 密钥字符串 */
     strcpy(cfg.encryption.sm4_key, "00112233445566778899aabbccddeeff");
@@ -1203,7 +1209,7 @@ void run_integration_tests(void)
     print_banner("Suite 1: 配置加载和验证 (Config Load & Validate)");
     test_config_load_valid();
     test_config_with_defaults();
-    test_config_load_reverse_proxy_mode();
+    test_config_load_reverse_node_type();
     test_config_load_nonexistent_file();
 
     /* Suite 2: KCP Wrapper Lifecycle */

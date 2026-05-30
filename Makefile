@@ -101,7 +101,7 @@ TEST_MYPROTO_BIN := tests/test_myproto
 # 集成测试
 TEST_INTEG_SRC   := tests/test_integration.c src/main.c src/af_packet.c src/myproto.c src/crypto.c src/kcp_wrap.c src/channel.c src/proxy.c src/ikcp.c
 TEST_INTEG_BIN   := tests/test_integration
-TEST_INTEG_FLAGS := $(TEST_CFLAGS) -DTEST_BUILD
+TEST_INTEG_FLAGS := $(TEST_CFLAGS) -DTEST_BUILD -Wno-unused-function
 TEST_INTEG_LIBS  := -ljson-c -lrt -lnettle
 
 # 对比测试（与原始项目 KCP-over-AF_PACKET 的交叉验证）
@@ -109,9 +109,14 @@ TEST_COMPARE_SRC  := tests/test_comparison.c src/myproto.c src/crypto.c src/chan
 TEST_COMPARE_BIN  := tests/test_comparison
 TEST_COMPARE_LIBS := -lrt -lnettle
 
-.PHONY: test test-unit test-integ test-compare test-clean
+# 扩展集成测试（20个新方法）
+TEST_INTEG2_SRC  := tests/test_integration_v2.c src/myproto.c src/crypto.c src/channel.c src/kcp_wrap.c src/ikcp.c
+TEST_INTEG2_BIN  := tests/test_integration_v2
+TEST_INTEG2_LIBS := -lrt -lnettle
 
-test: test-unit test-integ
+.PHONY: test test-unit test-integ test-integ2 test-compare test-clean
+
+test: test-unit test-integ test-integ2
 
 test-unit: $(TEST_MYPROTO_BIN)
 	@echo "  RUN     $(TEST_MYPROTO_BIN)"
@@ -120,6 +125,10 @@ test-unit: $(TEST_MYPROTO_BIN)
 test-integ: $(TEST_INTEG_BIN)
 	@echo "  RUN     $(TEST_INTEG_BIN)"
 	@./$(TEST_INTEG_BIN)
+
+test-integ2: $(TEST_INTEG2_BIN)
+	@echo "  RUN     $(TEST_INTEG2_BIN)"
+	@./$(TEST_INTEG2_BIN)
 
 $(TEST_MYPROTO_BIN): $(TEST_MYPROTO_SRC)
 	@mkdir -p tests
@@ -143,3 +152,8 @@ $(TEST_COMPARE_BIN): $(TEST_COMPARE_SRC)
 	@mkdir -p tests
 	@echo "  CC      $@"
 	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_COMPARE_SRC) $(TEST_COMPARE_LIBS)
+
+$(TEST_INTEG2_BIN): $(TEST_INTEG2_SRC)
+	@mkdir -p tests
+	@echo "  CC      $@"
+	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_INTEG2_SRC) $(TEST_INTEG2_LIBS)
