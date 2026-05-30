@@ -1,0 +1,327 @@
+/*
+ * kcp_wrap.c - KCP 包装模块实现
+ *
+ * 封装 KCP (ikcp) 库的创建、销毁、参数配置和输入/输出操作。
+ * 每个通道通过此模块管理一个独立的 KCP 实例。
+ *
+ * 上层 API 使用 uint8_t 类型的数据指针，内部适配到 ikcp 的 char 类型。
+ * 所有错误路径均通过 LOG_ERROR 记录详细信息。
+ */
+
+#include "kcp_wrap.h"
+#include "ikcp.h"
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* --------------------------------------------------------------------------
+ * 内部常量
+ * -------------------------------------------------------------------------- */
+
+/*
+ * KCP 内部定义 IKCP_WND_RCV = 128（参见 ikcp.c）。
+ * ikcp_send() 将数据拆分为 mss 大小的段，段数 count 必须 < IKCP_WND_RCV，
+ * 即 count <= 127，否则返回 -2。
+ * 因此单次发送的数据长度上限为 127 * mss。
+ */
+#define KCP_MAX_SEND_SEGMENTS   127
+
+/* ============================================================================
+ * 公共函数实现
+ * ============================================================================ */
+
+/*
+ * 创建 KCP 实例
+ */
+struct IKCPCB *kcp_wrap_create(IUINT32 conv, void *user)
+{
+    struct IKCPCB *kcp;
+
+    kcp = ikcp_create(conv, user);
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_create: ikcp_create(conv=%u) failed - "
+                  "returned NULL (likely out of memory)", conv);
+        return NULL;
+    }
+
+    LOG_DEBUG("kcp_wrap_create: KCP instance created (conv=%u, kcp=%p)",
+              conv, (void *)kcp);
+    return kcp;
+}
+
+/*
+ * 销毁 KCP 实例
+ */
+void kcp_wrap_destroy(struct IKCPCB *kcp)
+{
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_destroy: null kcp pointer");
+        return;
+    }
+
+    LOG_DEBUG("kcp_wrap_destroy: releasing KCP instance (conv=%u, kcp=%p)",
+              kcp->conv, (void *)kcp);
+    ikcp_release(kcp);
+}
+
+/*
+ * 设置 KCP 输出回调
+ *
+ * KCP 内部的 output 回调签名为:
+ *   int (*)(const char *buf, int len, struct IKCPCB *kcp, void *user)
+ *
+ * 本模块对外暴露的回调签名为:
+ *   int (*)(const char *buf, int len, void *user)
+ *
+ * 二者仅在参数数量上不同，通过强制类型转换适配。调用方通过
+ * ikcp_create() 时传入的 user 指针即可在回调中获取 channel_t 上下文。
+ */
+void kcp_wrap_set_output(struct IKCPCB *kcp, kcp_output_cb_t cb)
+{
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_set_output: null kcp pointer");
+        return;
+    }
+
+    if (!cb) {
+        LOG_ERROR("kcp_wrap_set_output: null callback pointer (kcp=%p)",
+                  (void *)kcp);
+        return;
+    }
+
+    ikcp_setoutput(kcp, cb);
+
+    LOG_DEBUG("kcp_wrap_set_output: output callback set (kcp=%p, cb=%p)",
+              (void *)kcp, (void *)cb);
+}
+
+/*
+ * 配置 KCP 参数
+ */
+void kcp_wrap_set_params(struct IKCPCB *kcp, int mtu, int sndwnd, int rcvwnd,
+                         int nodelay, int interval, int resend, int nc)
+{
+    int ret;
+
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_set_params: null kcp pointer");
+        return;
+    }
+
+    /* 设置 nodelay 模式: nodelay, interval, resend, nc */
+    ret = ikcp_nodelay(kcp, nodelay, interval, resend, nc);
+    if (ret != 0) {
+        LOG_ERROR("kcp_wrap_set_params: ikcp_nodelay(nodelay=%d, interval=%d, "
+                  "resend=%d, nc=%d) returned %d (kcp=%p)",
+                  nodelay, interval, resend, nc, ret, (void *)kcp);
+    }
+
+    /* 设置发送/接收窗口 */
+    ret = ikcp_wndsize(kcp, sndwnd, rcvwnd);
+    if (ret != 0) {
+        LOG_ERROR("kcp_wrap_set_params: ikcp_wndsize(sndwnd=%d, rcvwnd=%d) "
+                  "returned %d (kcp=%p)",
+                  sndwnd, rcvwnd, ret, (void *)kcp);
+    }
+
+    /* 设置 MTU */
+    ret = ikcp_setmtu(kcp, mtu);
+    if (ret != 0) {
+        LOG_ERROR("kcp_wrap_set_params: ikcp_setmtu(mtu=%d) returned %d "
+                  "(kcp=%p)", mtu, ret, (void *)kcp);
+    }
+
+    LOG_DEBUG("kcp_wrap_set_params: mtu=%d sndwnd=%d rcvwnd=%d "
+              "nodelay=%d interval=%d resend=%d nc=%d (kcp=%p)",
+              mtu, sndwnd, rcvwnd, nodelay, interval, resend, nc,
+              (void *)kcp);
+}
+
+/*
+ * 发送数据到 KCP（应用层 → KCP）
+ *
+ * 对 len 进行边界检查，防止超过 KCP 内部段数限制。
+ * KCP 内部 ikcp_send() 将数据按 mss 分片，最多允许
+ * (IKCP_WND_RCV - 1) = 127 个段。超出则返回 -1 并记录错误。
+ */
+int kcp_wrap_send(struct IKCPCB *kcp, const uint8_t *data, int len)
+{
+    int ret;
+    int max_len;
+
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_send: null kcp pointer");
+        return -1;
+    }
+
+    if (!data) {
+        LOG_ERROR("kcp_wrap_send: null data pointer (kcp=%p)", (void *)kcp);
+        return -1;
+    }
+
+    if (len < 0) {
+        LOG_ERROR("kcp_wrap_send: negative length %d (kcp=%p)",
+                  len, (void *)kcp);
+        return -1;
+    }
+
+    if (len == 0) {
+        return 0;
+    }
+
+    /*
+     * 边界检查: len 不能超过 KCP 单次发送上限。
+     * KCP 内部 ikcp_send() 检查: count >= IKCP_WND_RCV (128) 即返回 -2，
+     * 其中 count = (len + mss - 1) / mss。
+     * 因此最大允许段数为 127，最大字节数为 127 * mss。
+     */
+    if (kcp->mss > 0) {
+        max_len = (int)kcp->mss * KCP_MAX_SEND_SEGMENTS;
+        if (len > max_len) {
+            LOG_ERROR("kcp_wrap_send: len=%d exceeds max %d "
+                      "(mss=%u * %d segments) (kcp=%p)",
+                      len, max_len, kcp->mss, KCP_MAX_SEND_SEGMENTS,
+                      (void *)kcp);
+            return -1;
+        }
+    }
+
+    ret = ikcp_send(kcp, (const char *)data, len);
+    if (ret < 0) {
+        LOG_ERROR("kcp_wrap_send: ikcp_send(len=%d) returned %d (kcp=%p)",
+                  len, ret, (void *)kcp);
+        return -1;
+    }
+
+    return ret;
+}
+
+/*
+ * 从 KCP 接收数据（KCP → 应用层）
+ */
+int kcp_wrap_recv(struct IKCPCB *kcp, uint8_t *buf, int size)
+{
+    int ret;
+
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_recv: null kcp pointer");
+        return -1;
+    }
+
+    if (!buf) {
+        LOG_ERROR("kcp_wrap_recv: null buffer pointer (kcp=%p)", (void *)kcp);
+        return -1;
+    }
+
+    if (size <= 0) {
+        LOG_ERROR("kcp_wrap_recv: invalid buffer size %d (kcp=%p)",
+                  size, (void *)kcp);
+        return -1;
+    }
+
+    ret = ikcp_recv(kcp, (char *)buf, size);
+    if (ret < 0) {
+        /* ret < 0 表示没有完整的消息可读（EAGAIN 语义），这不是错误 */
+        return 0;
+    }
+
+    return ret;
+}
+
+/*
+ * 将收到的数据段输入 KCP（网络 → KCP）
+ */
+int kcp_wrap_input(struct IKCPCB *kcp, const uint8_t *data, int len)
+{
+    int ret;
+
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_input: null kcp pointer");
+        return -1;
+    }
+
+    if (!data) {
+        LOG_ERROR("kcp_wrap_input: null data pointer (kcp=%p)", (void *)kcp);
+        return -1;
+    }
+
+    if (len <= 0) {
+        LOG_ERROR("kcp_wrap_input: invalid length %d (kcp=%p)",
+                  len, (void *)kcp);
+        return -1;
+    }
+
+    ret = ikcp_input(kcp, (const char *)data, (long)len);
+    if (ret < 0) {
+        LOG_ERROR("kcp_wrap_input: ikcp_input(len=%d) returned %d (kcp=%p)",
+                  len, ret, (void *)kcp);
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * 更新 KCP 状态（驱动定时器）
+ */
+void kcp_wrap_update(struct IKCPCB *kcp, IUINT32 current_ms)
+{
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_update: null kcp pointer");
+        return;
+    }
+
+    ikcp_update(kcp, current_ms);
+}
+
+/*
+ * 获取 KCP 等待发送的字节数
+ */
+int kcp_wrap_waitsnd(struct IKCPCB *kcp)
+{
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_waitsnd: null kcp pointer");
+        return -1;
+    }
+
+    return ikcp_waitsnd(kcp);
+}
+
+/*
+ * 检查 KCP 是否有待发送的数据
+ */
+int kcp_wrap_has_pending(struct IKCPCB *kcp)
+{
+    int pending;
+
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_has_pending: null kcp pointer");
+        return 0;
+    }
+
+    pending = ikcp_waitsnd(kcp);
+    return (pending > 0) ? 1 : 0;
+}
+
+/*
+ * 获取当前毫秒时间戳
+ *
+ * 使用 CLOCK_MONOTONIC 获取单调递增时间，不受系统时间调整影响，
+ * 适合驱动 KCP 内部定时器。
+ */
+IUINT32 kcp_wrap_clock(void)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        LOG_ERROR("kcp_wrap_clock: clock_gettime(CLOCK_MONOTONIC) failed: %s",
+                  strerror(errno));
+        /* 尽力回退：返回 0 让调用方继续运行 */
+        return 0;
+    }
+
+    return (IUINT32)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}

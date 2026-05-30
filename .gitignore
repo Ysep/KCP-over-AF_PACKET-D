@@ -1,0 +1,10 @@
+obj/
+*.o
+*.d
+tests/test_myproto
+tests/test_integration
+tests/test_comparison
+*.swp
+*.swo
+*~
+.vscode/

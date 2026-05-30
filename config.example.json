@@ -1,0 +1,54 @@
+{
+    "interface": "eth0",
+    "ethertype": 35013,
+    "peer_mac": "aa:bb:cc:dd:ee:ff",
+    "local_mac": "",
+    "instance_name": "default",
+    "kcp": {
+        "mtu": 1400,
+        "sndwnd": 1024,
+        "rcvwnd": 1024,
+        "nodelay": 1,
+        "interval": 10,
+        "resend": 2,
+        "nc": 1
+    },
+    "proxy_mode": "forward",
+    "max_channels": 256,
+    "heartbeat_interval": 10,
+    "heartbeat_timeout": 60,
+    "encryption": {
+        "enabled": false,
+        "sm4_key": ""
+    },
+    "crc_enabled": true,
+    "auto_set_nic_mtu": false,
+    "nic_mtu": 1500,
+    "pid_file": "/var/run/kcp-afpacket.pid",
+    "channels": [
+        {
+            "channel_id": 1,
+            "listen_port": 8080,
+            "remote_port": 80,
+            "listen_addr": "127.0.0.1",
+            "remote_addr": "192.168.1.100",
+            "is_tcp": true
+        },
+        {
+            "channel_id": 2,
+            "listen_port": 8081,
+            "remote_port": 443,
+            "listen_addr": "127.0.0.1",
+            "remote_addr": "192.168.1.100",
+            "is_tcp": true
+        },
+        {
+            "channel_id": 3,
+            "listen_port": 5353,
+            "remote_port": 53,
+            "listen_addr": "127.0.0.1",
+            "remote_addr": "192.168.1.1",
+            "is_tcp": false
+        }
+    ]
+}
