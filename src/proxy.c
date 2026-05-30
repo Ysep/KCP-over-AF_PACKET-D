@@ -67,7 +67,7 @@ static channel_t *proxy_find_channel_by_fd(global_ctx_t *ctx, int fd)
         return NULL;
     }
 
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
+    for (i = 0; i < ctx->channel_hash_size; i++) {
         channel_t *ch = ctx->channel_hash[i];
         while (ch) {
             if (ch->local_fd == fd || ch->listen_fd == fd) {
@@ -124,6 +124,41 @@ static int proxy_ensure_epollout(global_ctx_t *ctx, channel_t *ch)
  * ============================================================================ */
 
 /*
+ * 解析地址字符串并填充 sockaddr_storage。
+ * 优先尝试 IPv6，然后回退到 IPv4。
+ * 返回 AF_INET、AF_INET6，失败返回 -1。
+ */
+static int resolve_addr(const char *addr_str, uint16_t port,
+                        struct sockaddr_storage *out_addr, socklen_t *out_len)
+{
+    memset(out_addr, 0, sizeof(*out_addr));
+
+    /* 尝试 IPv6 */
+    {
+        struct sockaddr_in6 *in6 = (struct sockaddr_in6 *)out_addr;
+        if (inet_pton(AF_INET6, addr_str, &in6->sin6_addr) == 1) {
+            in6->sin6_family = AF_INET6;
+            in6->sin6_port = htons(port);
+            *out_len = sizeof(*in6);
+            return AF_INET6;
+        }
+    }
+
+    /* 回退到 IPv4 */
+    {
+        struct sockaddr_in *in4 = (struct sockaddr_in *)out_addr;
+        if (inet_pton(AF_INET, addr_str, &in4->sin_addr) == 1) {
+            in4->sin_family = AF_INET;
+            in4->sin_port = htons(port);
+            *out_len = sizeof(*in4);
+            return AF_INET;
+        }
+    }
+
+    return -1;
+}
+
+/*
  * 初始化代理子系统
  */
 int proxy_init(global_ctx_t *ctx)
@@ -169,33 +204,39 @@ void proxy_shutdown(global_ctx_t *ctx)
  */
 int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
 {
-    int                fd;
-    int                optval;
-    struct sockaddr_in addr;
-    struct epoll_event ev;
+    int                     fd;
+    int                     optval;
+    struct sockaddr_storage addr;
+    socklen_t               addr_len;
+    int                     family;
+    struct epoll_event      ev;
 
     if (!ctx || !ch) {
         LOG_ERROR("proxy_start_listen: null pointer");
         return -1;
     }
 
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(ch->listen_port);
-
-    if (inet_pton(AF_INET, ch->listen_addr, &addr.sin_addr) != 1) {
-        LOG_ERROR("proxy_start_listen: invalid listen_addr '%s' (channel=%u)",
-                  ch->listen_addr, ch->channel_id);
+    family = resolve_addr(ch->listen_addr, ch->listen_port, &addr, &addr_len);
+    if (family < 0) {
+        LOG_ERROR("proxy_start_listen: invalid listen address '%s'", ch->listen_addr);
         return -1;
     }
 
     if (ch->is_tcp) {
         /* ---- TCP 监听套接字 ---- */
-        fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        fd = socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (fd < 0) {
             LOG_ERROR("proxy_start_listen: socket(TCP) failed: %s",
                       strerror(errno));
             return -1;
+        }
+
+        /* 启用 IPv6 双栈（IPv4 映射地址） */
+        if (family == AF_INET6) {
+            int no = 0;
+            if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) < 0) {
+                LOG_WARN("proxy_start_listen: IPV6_V6ONLY=0 failed: %s", strerror(errno));
+            }
         }
 
         /* SO_REUSEADDR: 允许快速重启时立即绑定端口 */
@@ -209,7 +250,7 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
         }
 
         /* 绑定到监听地址和端口 */
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        if (bind(fd, (struct sockaddr *)&addr, addr_len) < 0) {
             LOG_ERROR("proxy_start_listen: bind(%s:%u) failed: %s",
                       ch->listen_addr, ch->listen_port, strerror(errno));
             close(fd);
@@ -242,16 +283,25 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
         }
 
         LOG_INFO("proxy_start_listen: TCP listening on %s:%u "
-                 "(fd=%d, channel=%u)",
-                 ch->listen_addr, ch->listen_port, fd, ch->channel_id);
+                 "(fd=%d, channel=%u, family=AF_INET%s)",
+                 ch->listen_addr, ch->listen_port, fd, ch->channel_id,
+                 (family == AF_INET6) ? "6" : "");
 
     } else {
         /* ---- UDP 套接字 ---- */
-        fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        fd = socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
         if (fd < 0) {
             LOG_ERROR("proxy_start_listen: socket(UDP) failed: %s",
                       strerror(errno));
             return -1;
+        }
+
+        /* 启用 IPv6 双栈 */
+        if (family == AF_INET6) {
+            int no = 0;
+            if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &no, sizeof(no)) < 0) {
+                LOG_WARN("proxy_start_listen: IPV6_V6ONLY=0 failed: %s", strerror(errno));
+            }
         }
 
         /* SO_REUSEADDR */
@@ -265,7 +315,7 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
         }
 
         /* 绑定 */
-        if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        if (bind(fd, (struct sockaddr *)&addr, addr_len) < 0) {
             LOG_ERROR("proxy_start_listen: bind(%s:%u) failed: %s",
                       ch->listen_addr, ch->listen_port, strerror(errno));
             close(fd);
@@ -287,8 +337,9 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
         }
 
         LOG_INFO("proxy_start_listen: UDP bound to %s:%u "
-                 "(fd=%d, channel=%u)",
-                 ch->listen_addr, ch->listen_port, fd, ch->channel_id);
+                 "(fd=%d, channel=%u, family=AF_INET%s)",
+                 ch->listen_addr, ch->listen_port, fd, ch->channel_id,
+                 (family == AF_INET6) ? "6" : "");
     }
 
     return 0;
@@ -394,12 +445,14 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
  */
 int proxy_connect_remote(channel_t *ch)
 {
-    int                fd;
-    int                optval;
-    int                ret;
-    struct sockaddr_in addr;
-    struct epoll_event ev;
-    global_ctx_t      *ctx;
+    int                     fd;
+    int                     optval;
+    int                     ret;
+    struct sockaddr_storage addr;
+    socklen_t               addr_len;
+    int                     family;
+    struct epoll_event      ev;
+    global_ctx_t           *ctx;
 
     if (!ch) {
         LOG_ERROR("proxy_connect_remote: null channel");
@@ -412,11 +465,8 @@ int proxy_connect_remote(channel_t *ch)
         return -1;
     }
 
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons(ch->remote_port);
-
-    if (inet_pton(AF_INET, ch->remote_addr, &addr.sin_addr) != 1) {
+    family = resolve_addr(ch->remote_addr, ch->remote_port, &addr, &addr_len);
+    if (family < 0) {
         LOG_ERROR("proxy_connect_remote: invalid remote_addr '%s' "
                   "(channel=%u)", ch->remote_addr, ch->channel_id);
         return -1;
@@ -424,9 +474,9 @@ int proxy_connect_remote(channel_t *ch)
 
     /* 创建非阻塞套接字 */
     if (ch->is_tcp) {
-        fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        fd = socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     } else {
-        fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        fd = socket(family, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     }
 
     if (fd < 0) {
@@ -456,7 +506,7 @@ int proxy_connect_remote(channel_t *ch)
     }
 
     /* 非阻塞 connect */
-    ret = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+    ret = connect(fd, (struct sockaddr *)&addr, addr_len);
     if (ret < 0 && errno != EINPROGRESS) {
         LOG_ERROR("proxy_connect_remote: connect(%s:%u) failed: %s",
                   ch->remote_addr, ch->remote_port, strerror(errno));
@@ -567,8 +617,8 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
          * Under ET epoll, multiple datagrams arriving together would
          * lose all but the first without this loop.
          */
-        struct sockaddr_in peer_addr;
-        socklen_t          addr_len = sizeof(peer_addr);
+        struct sockaddr_storage peer_addr;
+        socklen_t               addr_len = sizeof(peer_addr);
 
         while (1) {
             /* POSIX: addr_len 是值-结果参数，每次调用前必须重置 */
@@ -788,17 +838,15 @@ int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
          * 对于已连接的 UDP 套接字，也可用 send()，
          * 但 sendto 更通用。
          */
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port   = htons(ch->remote_port);
-        if (inet_pton(AF_INET, ch->remote_addr, &addr.sin_addr) != 1) {
+        struct sockaddr_storage addr;
+        socklen_t addr_len;
+        if (resolve_addr(ch->remote_addr, ch->remote_port, &addr, &addr_len) < 0) {
             LOG_ERROR("proxy_write_to_local: invalid remote_addr '%s' "
                       "(channel=%u)", ch->remote_addr, ch->channel_id);
             return -1;
         }
         nwritten = sendto(ch->local_fd, data, (size_t)len, 0,
-                          (struct sockaddr *)&addr, sizeof(addr));
+                          (struct sockaddr *)&addr, addr_len);
     }
 
     if (nwritten < 0) {

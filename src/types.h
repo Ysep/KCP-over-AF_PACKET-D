@@ -60,8 +60,8 @@
 #define KCP_UPDATE_INTERVAL     10          /* ikcp_update 调用间隔（ms） */
 
 /* Channel 常量 */
-#define MAX_CHANNELS            256         /* 最大通道数 */
-#define CHANNEL_HASH_SIZE       512         /* 哈希表大小 */
+#define MAX_CHANNELS            4096        /* 最大通道配置数 */
+#define CHANNEL_HASH_SIZE_DEFAULT 1024      /* 默认哈希表大小 */
 #define CHANNEL_RECV_BUF_SIZE   8192        /* 通道接收缓冲区大小 */
 #define CHANNEL_ID_STATIC_MIN   1           /* 静态通道 ID 最小值 */
 #define HEARTBEAT_CH_ID         0xFFFF      /* 全局心跳通道ID */
@@ -289,14 +289,16 @@ typedef struct {
     int             ifindex;            /* 网卡接口索引 */
     uint8_t         local_mac[ETH_MAC_ADDR_LEN];   /* 本地 MAC */
     uint8_t         peer_mac[ETH_MAC_ADDR_LEN];    /* 对端 MAC（广播发现或配置） */
+    uint8_t         peer_mac_learned;   /* 1 if peer MAC was auto-learned */
     uint16_t        ethertype;          /* EtherType */
 
     /* 配置 */
     global_config_t config;             /* 全局配置 */
 
     /* 通道管理 */
-    channel_t      *channel_hash[CHANNEL_HASH_SIZE]; /* 通道哈希表 */
-    int             channel_count;      /* 当前活跃通道数 */
+    channel_t     **channel_hash;                /* 通道哈希表（动态分配） */
+    uint16_t        channel_hash_size;           /* 哈希表桶数 */
+    int             channel_count;               /* 当前活跃通道数 */
 
     /* epoll */
     int             epoll_fd;           /* epoll 文件描述符 */
@@ -304,6 +306,7 @@ typedef struct {
     /* 运行状态 */
     volatile int    running;            /* 运行标志 */
     volatile int    reload_requested;   /* 配置重载请求 */
+    char            config_path[MAX_CONFIG_PATH]; /* 配置文件路径（用于热重载） */
     uint32_t        last_global_heartbeat;  /* 上一次全局心跳响应时间 */
 
     /* 统计 */

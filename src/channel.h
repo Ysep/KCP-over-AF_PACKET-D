@@ -16,10 +16,11 @@
 
 /*
  * 初始化通道子系统
- * @param ctx 全局上下文
- * @return    成功返回 0，失败返回 -1
+ * @param ctx          全局上下文
+ * @param max_channels 最大通道数
+ * @return             成功返回 0，失败返回 -1
  */
-int channel_init(global_ctx_t *ctx);
+int channel_init(global_ctx_t *ctx, int max_channels);
 
 /*
  * 关闭通道子系统，释放所有通道资源

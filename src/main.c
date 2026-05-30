@@ -122,6 +122,14 @@ static int mac_is_zero(const uint8_t mac[ETH_MAC_ADDR_LEN])
     return 1;
 }
 
+/* Return 1 if mac is broadcast (all 0xFF) */
+static int mac_is_broadcast(const uint8_t mac[ETH_MAC_ADDR_LEN])
+{
+    for (int i = 0; i < ETH_MAC_ADDR_LEN; i++)
+        if (mac[i] != 0xFF) return 0;
+    return 1;
+}
+
 /* ---- 配置加载 ---- */
 int config_load(const char *path, global_config_t *config)
 {
@@ -246,7 +254,7 @@ int config_load(const char *path, global_config_t *config)
     if (json_object_object_get_ex(root, "max_channels", &tmp)) {
         config->max_channels = json_object_get_int(tmp);
     } else {
-        config->max_channels = MAX_CHANNELS;
+        config->max_channels = 256;
     }
 
     /* ---- heartbeat_interval ---- */
@@ -571,6 +579,63 @@ static void cleanup(global_ctx_t *ctx)
     }
 }
 
+/* ---- 配置热重载 ---- */
+static int config_reload(global_ctx_t *ctx, const char *config_path)
+{
+    global_config_t new_cfg;
+    memset(&new_cfg, 0, sizeof(new_cfg));
+
+    if (config_load(config_path, &new_cfg) != 0) {
+        LOG_ERROR("Config reload: failed to load %s", config_path);
+        return -1;
+    }
+
+    if (validate_config(&new_cfg) != 0) {
+        LOG_ERROR("Config reload: validation failed");
+        return -1;
+    }
+
+    /* Only update runtime-tunable params (not interface, MAC, channels) */
+    ctx->config.crc_enabled        = new_cfg.crc_enabled;
+    ctx->config.heartbeat_interval = new_cfg.heartbeat_interval;
+    ctx->config.heartbeat_timeout  = new_cfg.heartbeat_timeout;
+    ctx->config.kcp_nodelay        = new_cfg.kcp_nodelay;
+    ctx->config.kcp_interval       = new_cfg.kcp_interval;
+    ctx->config.kcp_resend         = new_cfg.kcp_resend;
+    ctx->config.kcp_nc             = new_cfg.kcp_nc;
+    ctx->config.kcp_send_window    = new_cfg.kcp_send_window;
+    ctx->config.kcp_recv_window    = new_cfg.kcp_recv_window;
+
+    /* Update KCP params on all existing channels */
+    for (int i = 0; i < ctx->channel_hash_size; i++) {
+        channel_t *ch = ctx->channel_hash[i];
+        while (ch) {
+            if (ch->kcp) {
+                ikcp_wndsize(ch->kcp, ctx->config.kcp_send_window, ctx->config.kcp_recv_window);
+                ikcp_nodelay(ch->kcp, ctx->config.kcp_nodelay, ctx->config.kcp_interval,
+                            ctx->config.kcp_resend, ctx->config.kcp_nc);
+            }
+            ch = ch->hash_next;
+        }
+    }
+
+    /* Update encryption if encryption config changed */
+    if (new_cfg.encryption.enabled != ctx->config.encryption.enabled ||
+        strcmp(new_cfg.encryption.sm4_key, ctx->config.encryption.sm4_key) != 0) {
+        crypto_cleanup();
+        ctx->config.encryption = new_cfg.encryption;
+        if (ctx->config.encryption.enabled) {
+            if (crypto_init(&ctx->config.encryption) < 0) {
+                LOG_ERROR("Config reload: crypto re-init failed, encryption disabled");
+                ctx->config.encryption.enabled = 0;
+            }
+        }
+    }
+
+    LOG_INFO("Configuration reloaded successfully");
+    return 0;
+}
+
 /* ---- 主入口 ---- */
 #ifndef TEST_BUILD
 int main(int argc, char *argv[])
@@ -632,6 +697,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* Save config path for hot-reload */
+    strncpy(ctx.config_path, config_path, sizeof(ctx.config_path) - 1);
+    ctx.config_path[sizeof(ctx.config_path) - 1] = '\0';
+
     /* ================================================================
      * 4. 验证配置
      * ================================================================ */
@@ -670,7 +739,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 7. 初始化通道子系统
      * ================================================================ */
-    if (channel_init(&ctx) != 0) {
+    if (channel_init(&ctx, ctx.config.max_channels) != 0) {
         LOG_ERROR("Failed to initialize channel subsystem");
         cleanup(&ctx);
         return 1;
@@ -713,12 +782,12 @@ int main(int argc, char *argv[])
      * 10. 对端 MAC
      * ================================================================ */
     if (mac_is_zero(ctx.config.peer_mac)) {
-        LOG_WARN("Peer MAC not configured; auto-discovery not implemented yet. "
-                 "Broadcast will be used, or communication may fail.");
-        /* 使用广播地址作为后备 */
+        LOG_INFO("Peer MAC not configured — using auto-discovery (broadcast initially)");
         memset(ctx.peer_mac, 0xFF, ETH_MAC_ADDR_LEN);
+        ctx.peer_mac_learned = 0;
     } else {
         memcpy(ctx.peer_mac, ctx.config.peer_mac, ETH_MAC_ADDR_LEN);
+        ctx.peer_mac_learned = 1;
     }
 
     /* ================================================================
@@ -827,7 +896,9 @@ int main(int argc, char *argv[])
                 if (errno == EINTR) {
                     /* 被信号中断，检查是否退出或重载 */
                     if (ctx.reload_requested) {
-                        LOG_INFO("Config reload triggered (not fully implemented)");
+                        if (config_reload(&ctx, ctx.config_path) == 0) {
+                            LOG_INFO("Configuration reloaded (SIGHUP)");
+                        }
                         ctx.reload_requested = 0;
                     }
                     continue;
@@ -887,6 +958,22 @@ int main(int argc, char *argv[])
                              * 此处我们只做校验，不修改 payload_len */
                         }
 
+                        /* MAC auto-learning: if peer_mac is broadcast, learn from first valid frame */
+                        if (ctx.peer_mac_learned == 0 && !mac_is_broadcast(src_mac)) {
+                            memcpy(ctx.peer_mac, src_mac, ETH_MAC_ADDR_LEN);
+                            ctx.peer_mac_learned = 1;
+                            LOG_INFO("Auto-learned peer MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                                     src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
+                            /* Update all existing channels with learned MAC */
+                            for (int i = 0; i < ctx.channel_hash_size; i++) {
+                                channel_t *ch = ctx.channel_hash[i];
+                                while (ch) {
+                                    memcpy(ch->peer_mac, ctx.peer_mac, ETH_MAC_ADDR_LEN);
+                                    ch = ch->hash_next;
+                                }
+                            }
+                        }
+
                         /* 路由到通道处理 */
                         channel_process_frame(&ctx, &hdr, payload, payload_len);
                     }
@@ -925,7 +1012,9 @@ int main(int argc, char *argv[])
 
             /* ---- 配置重载请求 ---- */
             if (ctx.reload_requested) {
-                LOG_INFO("Config reload requested (SIGHUP) — full reload not yet implemented, continuing with current config");
+                if (config_reload(&ctx, ctx.config_path) == 0) {
+                    LOG_INFO("Configuration reloaded (SIGHUP)");
+                }
                 ctx.reload_requested = 0;
             }
         }

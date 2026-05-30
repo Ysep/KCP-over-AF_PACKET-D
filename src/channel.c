@@ -39,7 +39,8 @@ static global_ctx_t *g_ctx = NULL;
  */
 static inline unsigned int channel_hash(uint16_t channel_id)
 {
-    return channel_id % CHANNEL_HASH_SIZE;
+    if (!g_ctx) return 0;
+    return channel_id % g_ctx->channel_hash_size;
 }
 
 /*
@@ -251,9 +252,9 @@ static int channel_send_heartbeat_ctrl(global_ctx_t *ctx, uint8_t flags)
 /*
  * 初始化通道子系统
  */
-int channel_init(global_ctx_t *ctx)
+int channel_init(global_ctx_t *ctx, int max_channels)
 {
-    int i;
+    uint32_t hash_size;
 
     if (!ctx) {
         LOG_ERROR("channel_init: null ctx pointer");
@@ -263,16 +264,23 @@ int channel_init(global_ctx_t *ctx)
     /* 保存全局上下文指针 */
     g_ctx = ctx;
 
-    /* 初始化哈希表所有槽位为 NULL */
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
-        ctx->channel_hash[i] = NULL;
+    /* 计算哈希表大小：max_channels * 2，限幅 [64, 65536] */
+    hash_size = (uint32_t)max_channels * 2;
+    if (hash_size < 64) hash_size = 64;
+    if (hash_size > 65536) hash_size = 65536;
+
+    ctx->channel_hash = calloc(hash_size, sizeof(channel_t *));
+    if (!ctx->channel_hash) {
+        LOG_ERROR("channel_init: failed to allocate hash table (%u buckets)", hash_size);
+        return -1;
     }
+    ctx->channel_hash_size = (uint16_t)hash_size;
 
     /* 重置通道计数 */
     ctx->channel_count = 0;
 
-    LOG_DEBUG("channel_init: subsystem initialized (hash_size=%d)",
-              CHANNEL_HASH_SIZE);
+    LOG_INFO("Channel hash table allocated: %u buckets for up to %d channels",
+             hash_size, max_channels);
 
     return 0;
 }
@@ -297,17 +305,17 @@ void channel_shutdown(global_ctx_t *ctx)
      * 注意：channel_destroy 会修改链表，因此需要小心遍历。
      * 每次取桶的第一个元素销毁，直到桶为空。
      */
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
+    for (i = 0; i < ctx->channel_hash_size; i++) {
         while (ctx->channel_hash[i]) {
             channel_t *ch = ctx->channel_hash[i];
             channel_destroy(ctx, ch);
         }
     }
 
-    /* 确保所有槽位为 NULL */
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
-        ctx->channel_hash[i] = NULL;
-    }
+    /* 释放哈希表内存 */
+    free(ctx->channel_hash);
+    ctx->channel_hash = NULL;
+    ctx->channel_hash_size = 0;
 
     ctx->channel_count = 0;
 
@@ -1171,7 +1179,7 @@ void channel_heartbeat(global_ctx_t *ctx)
         return;
     }
 
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
+    for (i = 0; i < ctx->channel_hash_size; i++) {
         channel_t *ch = ctx->channel_hash[i];
 
         while (ch) {
@@ -1227,7 +1235,7 @@ void channel_timeout_check(global_ctx_t *ctx)
         hb_timeout = HEARTBEAT_TIMEOUT;
     }
 
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
+    for (i = 0; i < ctx->channel_hash_size; i++) {
         channel_t *ch = ctx->channel_hash[i];
 
         while (ch) {
@@ -1367,7 +1375,7 @@ void channel_kcp_update(global_ctx_t *ctx)
 
     current_ms = kcp_wrap_clock();
 
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
+    for (i = 0; i < ctx->channel_hash_size; i++) {
         channel_t *ch = ctx->channel_hash[i];
 
         while (ch) {
@@ -1402,7 +1410,7 @@ void channel_foreach(global_ctx_t *ctx, channel_foreach_cb_t callback,
         return;
     }
 
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
+    for (i = 0; i < ctx->channel_hash_size; i++) {
         channel_t *ch = ctx->channel_hash[i];
 
         while (ch) {
@@ -1446,7 +1454,7 @@ void channel_close_all(global_ctx_t *ctx)
     LOG_DEBUG("channel_close_all: initiating graceful shutdown "
               "(count=%d)", ctx->channel_count);
 
-    for (i = 0; i < CHANNEL_HASH_SIZE; i++) {
+    for (i = 0; i < ctx->channel_hash_size; i++) {
         channel_t *ch = ctx->channel_hash[i];
 
         while (ch) {
