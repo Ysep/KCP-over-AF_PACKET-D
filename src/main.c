@@ -238,16 +238,16 @@ int config_load(const char *path, global_config_t *config)
         config->kcp_nc          = KCP_NC;
     }
 
-    /* ---- proxy_mode ---- */
-    if (json_object_object_get_ex(root, "proxy_mode", &tmp)) {
+    /* ---- node_type ---- */
+    if (json_object_object_get_ex(root, "node_type", &tmp)) {
         const char *s = json_object_get_string(tmp);
         if (s && strcmp(s, "backend") == 0) {
-            config->proxy_mode = PROXY_MODE_BACKEND;
+            config->node_type = NODE_TYPE_BACKEND;
         } else {
-            config->proxy_mode = PROXY_MODE_FRONTEND;
+            config->node_type = NODE_TYPE_FRONTEND;
         }
     } else {
-        config->proxy_mode = PROXY_MODE_FRONTEND;
+        config->node_type = NODE_TYPE_FRONTEND;
     }
 
     /* ---- max_channels ---- */
@@ -447,9 +447,9 @@ int validate_config(const global_config_t *config)
         return -1;
     }
 
-    /* proxy_mode 校验 */
-    if (config->proxy_mode != PROXY_MODE_FRONTEND && config->proxy_mode != PROXY_MODE_BACKEND) {
-        LOG_ERROR("Invalid proxy_mode: %d", config->proxy_mode);
+    /* node_type 校验 */
+    if (config->node_type != NODE_TYPE_FRONTEND && config->node_type != NODE_TYPE_BACKEND) {
+        LOG_ERROR("Invalid node_type: %d", config->node_type);
         return -1;
     }
 
@@ -506,7 +506,7 @@ int validate_config(const global_config_t *config)
     }
 
     LOG_INFO("Configuration validated successfully: %s, %d channels, ethertype=0x%04X",
-             config->proxy_mode == PROXY_MODE_FRONTEND ? "frontend" : "backend",
+             config->node_type == NODE_TYPE_FRONTEND ? "frontend" : "backend",
              config->channel_count, config->ethertype);
 
     return 0;
@@ -818,7 +818,7 @@ int main(int argc, char *argv[])
         channel_config_t *ch_cfg = &ctx.config.channels[i];
         channel_role_t role;
 
-        if (ctx.config.proxy_mode == PROXY_MODE_FRONTEND) {
+        if (ctx.config.node_type == NODE_TYPE_FRONTEND) {
             role = CHANNEL_ROLE_INITIATOR;
         } else {
             role = CHANNEL_ROLE_RESPONDER;
@@ -842,7 +842,7 @@ int main(int argc, char *argv[])
         ch->ethertype = ctx.ethertype;
 
         /* 启动代理：frontend代理模式监听本地端口，backend代理在连接建立后处理 */
-        if (ctx.config.proxy_mode == PROXY_MODE_FRONTEND) {
+        if (ctx.config.node_type == NODE_TYPE_FRONTEND) {
             if (proxy_start_listen(&ctx, ch) != 0) {
                 LOG_ERROR("Failed to start listen for channel id=%u",
                           ch_cfg->channel_id);
@@ -877,7 +877,7 @@ int main(int argc, char *argv[])
     LOG_INFO("KCP-over-AF_PACKET v" VERSION " started. "
              "Instance: %s, Mode: %s, interface: %s, ethertype: 0x%04X, channels: %d",
              ctx.config.instance_name,
-             ctx.config.proxy_mode == PROXY_MODE_FRONTEND ? "frontend" : "backend",
+             ctx.config.node_type == NODE_TYPE_FRONTEND ? "frontend" : "backend",
              ctx.config.interface, ctx.config.ethertype, ctx.config.channel_count);
 
     /* 写入 PID 文件 */

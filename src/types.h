@@ -118,9 +118,9 @@ typedef enum {
 
 /* 代理模式 */
 typedef enum {
-    PROXY_MODE_FRONTEND  = 0,    /* 前端代理：监听本地端口，转发到远端 */
-    PROXY_MODE_BACKEND   = 1     /* 后端代理：从 AF_PACKET 接收，转发到本地服务 */
-} proxy_mode_t;
+    NODE_TYPE_FRONTEND  = 0,    /* 前端节点：面向客户端，接收连接 */
+    NODE_TYPE_BACKEND   = 1     /* 后端节点：面向服务端，转发数据 */
+} node_type_t;
 
 /* 加密模式 */
 typedef enum {
@@ -186,7 +186,7 @@ typedef struct {
     int         kcp_nc;                 /* 流控关闭 */
 
     /* 代理配置 */
-    proxy_mode_t proxy_mode;            /* 代理模式 */
+    node_type_t node_type;            /* 节点角色（frontend/backend） */
     int          max_channels;          /* 最大通道数 */
     int          heartbeat_interval;    /* 心跳间隔（秒） */
     int          heartbeat_timeout;     /* 心跳超时（秒） */

@@ -657,7 +657,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 /* Set up local socket for the new responder channel.
                  * Frontend proxy: responder connects to remote service.
                  * Backend proxy: responder listens for local clients. */
-                if (g_ctx && g_ctx->config.proxy_mode == PROXY_MODE_FRONTEND) {
+                if (g_ctx && g_ctx->config.node_type == NODE_TYPE_FRONTEND) {
                     /* Frontend: connect to remote_addr:remote_port */
                     if (proxy_connect_remote(ch) < 0) {
                         LOG_ERROR("Failed to connect remote for "
@@ -728,7 +728,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                           hdr->channel_id);
 
                 /* If we're a backend proxy responder, connect to local service */
-                if (g_ctx && g_ctx->config.proxy_mode == PROXY_MODE_BACKEND &&
+                if (g_ctx && g_ctx->config.node_type == NODE_TYPE_BACKEND &&
                     ch->local_fd < 0) {
                     if (proxy_connect_remote(ch) < 0) {
                         LOG_ERROR("Failed to connect to remote service "

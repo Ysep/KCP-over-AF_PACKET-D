@@ -5,7 +5,7 @@
     "peer_mac": "1a:af:4e:ed:9d:91",
     "nic_mtu": 1500,
     "ethertype": 35013,
-    "proxy_mode": "frontend",
+    "node_type": "frontend",
     "encryption": {
         "enabled": false,
         "sm4_key": ""
