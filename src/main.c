@@ -320,7 +320,7 @@ int config_load(const char *path, global_config_t *config)
     if (json_object_object_get_ex(root, "max_channels", &tmp)) {
         config->max_channels = json_object_get_int(tmp);
     } else {
-        config->max_channels = 256;
+        config->max_channels = 4096;
     }
 
     /* ---- heartbeat_interval ---- */

@@ -288,7 +288,7 @@ static void test_config_with_defaults(void)
           "default kcp_recv_window mismatch");
     CHECK(cfg.node_type == NODE_TYPE_FRONTEND,
           "default node_type mismatch");
-    CHECK(cfg.max_channels == 256,
+    CHECK(cfg.max_channels == 4096,
           "default max_channels mismatch");
     CHECK(cfg.crc_enabled == 0,
           "default crc_enabled should be 0");
