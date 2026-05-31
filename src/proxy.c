@@ -466,19 +466,70 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
             return -1;
         }
 
-        ch->local_fd = client_fd;
+        /*
+         * 多会话模式：listener 标志 + max_sessions>1 → 创建动态通道。
+         * 单会话模式：绑定到 ch 自身（旧行为）。
+         */
+        if ((ch->flags & CH_FLAG_STATIC_LISTENER) &&
+            ch->listener_idx < ctx->config.channel_count &&
+            ctx->config.channels[ch->listener_idx].max_sessions > 1) {
 
-        /* 添加到 epoll（edge-triggered 用于高性能数据收发） */
-        if (proxy_epoll_add(ctx, client_fd, ch) < 0) {
-            close(client_fd);
-            ch->local_fd = -1;
-            return -1;
+            uint16_t new_id = alloc_channel_id(ctx, ch->listener_idx);
+            if (new_id == 0) {
+                LOG_WARN("proxy_accept: channel ID exhausted for listener %u",
+                         ch->channel_id);
+                close(client_fd);
+                continue;
+            }
+
+            channel_t *new_ch = channel_create(ctx, new_id,
+                                CHANNEL_ROLE_INITIATOR,
+                                ch->listen_port, ch->remote_port,
+                                ch->listen_addr, ch->remote_addr,
+                                ch->is_tcp);
+            if (!new_ch) {
+                close(client_fd);
+                continue;
+            }
+
+            new_ch->raw_sock  = ch->raw_sock;
+            new_ch->ifindex   = ch->ifindex;
+            new_ch->ethertype = ch->ethertype;
+            memcpy(new_ch->local_mac, ch->local_mac, ETH_MAC_ADDR_LEN);
+            memcpy(new_ch->peer_mac,  ch->peer_mac,  ETH_MAC_ADDR_LEN);
+
+            new_ch->local_fd = client_fd;
+            if (proxy_epoll_add(ctx, client_fd, new_ch) < 0) {
+                channel_destroy(ctx, new_ch);
+                continue;
+            }
+
+            LOG_INFO("proxy_accept: new session chan=%u fd=%d (listener=%u)",
+                     new_id, client_fd, ch->channel_id);
+        } else {
+            /* 单会话模式 */
+            if (ch->local_fd >= 0) {
+                LOG_WARN("proxy_accept: channel %u busy (local_fd=%d), "
+                         "closing extra connection fd=%d",
+                         ch->channel_id, ch->local_fd, client_fd);
+                close(client_fd);
+                continue;
+            }
+
+            ch->local_fd = client_fd;
+
+            /* 添加到 epoll（edge-triggered 用于高性能数据收发） */
+            if (proxy_epoll_add(ctx, client_fd, ch) < 0) {
+                close(client_fd);
+                ch->local_fd = -1;
+                return -1;
+            }
+
+            LOG_INFO("proxy_accept: accepted connection fd=%d on channel %u "
+                     "(listen_fd=%d)", client_fd, ch->channel_id, ch->listen_fd);
+
+            return client_fd;
         }
-
-        LOG_INFO("proxy_accept: accepted connection fd=%d on channel %u "
-                 "(listen_fd=%d)", client_fd, ch->channel_id, ch->listen_fd);
-
-        return client_fd;
     }
 
     /* 无新连接（EAGAIN），返回 -1 表示本次无连接 */
@@ -1085,8 +1136,17 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
             LOG_ERROR("proxy_handle_event: error on listen_fd=%d "
                       "(channel=%u, events=0x%x)",
                       fd, ch->channel_id, events);
-            proxy_close_local(ch);
-            ch->state = CHANNEL_CLOSED;
+            if (ch->flags & CH_FLAG_STATIC_LISTENER) {
+                /* Listener: 重建监听套接字 */
+                if (ch->listen_fd >= 0) {
+                    proxy_epoll_del(ctx, ch->listen_fd);
+                    close(ch->listen_fd);
+                }
+                proxy_start_listen(ctx, ch);
+            } else {
+                proxy_close_local(ch);
+                ch->state = CHANNEL_CLOSED;
+            }
             return -1;
         }
 

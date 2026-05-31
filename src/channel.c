@@ -327,6 +327,9 @@ int channel_init(global_ctx_t *ctx, int max_channels)
     }
     ctx->channel_hash_size = hash_size;
 
+    /* 初始化动态通道 ID 分配器 */
+    ctx->next_dynamic_channel_id = 257;
+
     /* 重置通道计数 */
     ctx->channel_count = 0;
 
@@ -374,6 +377,29 @@ void channel_shutdown(global_ctx_t *ctx)
     g_ctx = NULL;
 
     LOG_DEBUG("channel_shutdown: all channels destroyed");
+}
+
+/*
+ * 分配动态数据通道 ID。
+ * listener_idx: listener 在 g_ctx->config.channels[] 中的 array index。
+ * 每个 listener 独占 [257+idx*256, 512+idx*256) 共 256 个 ID。
+ */
+uint16_t alloc_channel_id(global_ctx_t *ctx, int listener_idx)
+{
+    uint16_t base = (uint16_t)(257 + (uint32_t)listener_idx * 256);
+    uint16_t max  = (uint16_t)(base + 255);
+
+    if (ctx->next_dynamic_channel_id < base ||
+        ctx->next_dynamic_channel_id > max) {
+        ctx->next_dynamic_channel_id = base;
+    }
+
+    for (int attempt = 0; attempt < 256; attempt++) {
+        uint16_t id = ctx->next_dynamic_channel_id++;
+        if (id > max) ctx->next_dynamic_channel_id = base;
+        if (channel_find(ctx, id) == NULL) return id;
+    }
+    return 0;
 }
 
 /*
@@ -515,7 +541,8 @@ channel_t *channel_create(global_ctx_t *ctx, uint16_t channel_id,
      * 发起方角色：立即发送 SYN 建立连接。
      * proxy_start_listen 由 main.c 统一调用，不在此处重复。
      */
-    if (role == CHANNEL_ROLE_INITIATOR) {
+    switch (role) {
+    case CHANNEL_ROLE_INITIATOR:
         ch->state       = CHANNEL_SYN_SENT;
         ch->syn_sent_at = time_now();
 
@@ -530,6 +557,18 @@ channel_t *channel_create(global_ctx_t *ctx, uint16_t channel_id,
              * 会在 channel_timeout_check 中处理。
              */
         }
+        break;
+    case CHANNEL_ROLE_RESPONDER:
+        ch->state = CHANNEL_SYN_RCVD;
+        break;
+    case CHANNEL_ROLE_LISTENER:
+        /* Listener: 不发送 SYN，不设置 local_fd。
+         * listen_fd 由 main.c 调用 proxy_start_listen 设置。 */
+        ch->state = CHANNEL_ESTABLISHED;  /* 假装就绪以兼容现有流程 */
+        break;
+    default:
+        ch->state = CHANNEL_CLOSED;
+        break;
     }
 
     return ch;
@@ -579,7 +618,7 @@ void channel_destroy(global_ctx_t *ctx, channel_t *ch)
     }
 
     /* 关闭监听套接字（TCP/UDP 使用 close()，非 af_packet_close()） */
-    if (ch->listen_fd >= 0) {
+    if (ch->listen_fd >= 0 && !(ch->flags & CH_FLAG_STATIC_LISTENER)) {
         proxy_epoll_del(ctx, ch->listen_fd);
         close(ch->listen_fd);
         ch->listen_fd = -1;
@@ -686,6 +725,13 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 uint8_t                 tcp   = 1;
 
                 cfg = channel_lookup_config(hdr->channel_id);
+                /* Dynamic ID fallback: if not found in config, derive from (id-257)/256 */
+                if (!cfg) {
+                    uint16_t base_idx = (uint16_t)((hdr->channel_id - 257) / 256);
+                    if (base_idx < g_ctx->config.channel_count) {
+                        cfg = &g_ctx->config.channels[base_idx];
+                    }
+                }
                 if (cfg) {
                     lport = cfg->listen_port;
                     rport = cfg->remote_port;
@@ -710,11 +756,11 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                  * Backend proxy: responder listens for local clients. */
                 if (g_ctx && g_ctx->config.node_type == NODE_TYPE_FRONTEND) {
                     /* Frontend: connect to remote_addr:remote_port */
-                    if (proxy_connect_remote(ch) < 0) {
+                    if (proxy_connect_remote(ch) == 0) {
+                        channel_send_ctrl(ch, MPF_ACK);
+                    } else {
                         LOG_ERROR("Failed to connect remote for "
-                                  "dynamic channel %u", ch->channel_id);
-                        channel_send_ctrl(ch, MPF_RST);
-                        ch->state = CHANNEL_CLOSED;
+                                  "dynamic channel %u, destroying", ch->channel_id);
                         channel_destroy(ctx, ch);
                         return -1;
                     }
@@ -728,6 +774,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                         channel_destroy(ctx, ch);
                         return -1;
                     }
+                    channel_send_ctrl(ch, MPF_ACK);
                 }
             } else {
                 /* Channel found — validate state before accepting SYN.
@@ -749,14 +796,9 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                               hdr->channel_id);
                     return 0;
                 }
+                channel_send_ctrl(ch, MPF_ACK);
             }
 
-            /* 发送 ACK，进入 SYN_RCVD（等待对端数据确认连接） */
-            if (channel_send_ctrl(ch, MPF_ACK) != 0) {
-                LOG_ERROR("channel_process_frame: "
-                          "failed to send ACK for channel %u",
-                          hdr->channel_id);
-            }
             ch->state          = CHANNEL_SYN_RCVD;
             ch->last_peer_seen = now;
             ch->last_active    = now;
@@ -1298,6 +1340,12 @@ void channel_timeout_check(global_ctx_t *ctx)
 
         while (ch) {
             channel_t *next = ch->hash_next;
+
+            /* Skip static listener channels — they are not subject to data channel timeouts */
+            if (ch->flags & CH_FLAG_STATIC_LISTENER) {
+                ch = next;
+                continue;
+            }
 
             /*
              * 检查 0: CLOSED 僵尸通道清理

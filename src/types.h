@@ -111,9 +111,14 @@ typedef enum {
 } channel_state_t;
 
 /* 通道角色 */
+/* 通道标志位 */
+#define CH_FLAG_STATIC_LISTENER 0x01        /* 静态 listener 通道（不被 destroy 销毁） */
+
+/* 通道角色 */
 typedef enum {
     CHANNEL_ROLE_INITIATOR = 0, /* 发起方（主动连接） */
-    CHANNEL_ROLE_RESPONDER = 1  /* 响应方（被动接受） */
+    CHANNEL_ROLE_RESPONDER = 1, /* 响应方（被动接受） */
+    CHANNEL_ROLE_LISTENER  = 2  /* 监听方（仅 listen，不发 SYN） */
 } channel_role_t;
 
 /* 代理模式 */
@@ -157,6 +162,7 @@ typedef struct {
     char        remote_addr[MAX_REMOTE_ADDR];  /* 远端目标地址 */
     uint8_t     is_tcp;                     /* 1=TCP, 0=UDP */
     uint8_t     enabled;                    /* 是否启用此通道 */
+    uint16_t    max_sessions;               /* 此端口最大并发数，0=默认1 */
 } channel_config_t;
 
 /* 加密配置（兼容B项目的crypto.h接口） */
@@ -238,6 +244,8 @@ typedef struct channel_s {
     uint16_t        channel_id;         /* 通道 ID */
     channel_state_t state;              /* 当前状态 */
     channel_role_t  role;               /* 通道角色 */
+    uint32_t        flags;              /* 标志位（CH_FLAG_*） */
+    uint8_t         listener_idx;       /* 在 config.channels[] 中的索引 */
 
     /* KCP 实例 */
     struct IKCPCB  *kcp;                /* KCP 控制块指针 */
@@ -307,6 +315,7 @@ typedef struct {
     volatile int    running;            /* 运行标志 */
     volatile int    reload_requested;   /* 配置重载请求 */
     char            config_path[MAX_CONFIG_PATH]; /* 配置文件路径（用于热重载） */
+    uint16_t        next_dynamic_channel_id; /* 下一个动态分配的 channel_id */
     uint32_t        last_global_heartbeat;  /* 上一次全局心跳响应时间 */
 
     /* 统计 */

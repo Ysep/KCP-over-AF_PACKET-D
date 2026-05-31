@@ -29,6 +29,14 @@ int channel_init(global_ctx_t *ctx, int max_channels);
 void channel_shutdown(global_ctx_t *ctx);
 
 /*
+ * 分配动态数据通道 ID
+ * @param ctx          全局上下文
+ * @param listener_idx listener 在 config.channels[] 中的 array index
+ * @return             成功返回通道 ID，失败返回 0
+ */
+uint16_t alloc_channel_id(global_ctx_t *ctx, int listener_idx);
+
+/*
  * 创建新通道
  * @param ctx        全局上下文
  * @param channel_id 通道 ID

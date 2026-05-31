@@ -450,6 +450,15 @@ int config_load(const char *path, global_config_t *config)
             }
 
             ch_cfg->enabled = 1;
+
+            /* max_sessions: 0=默认1，上限256 */
+            if (json_object_object_get_ex(ch_obj, "max_sessions", &tmp)) {
+                int ms = json_object_get_int(tmp);
+                ch_cfg->max_sessions = (ms > 0 && ms <= 256) ? (uint16_t)ms : 1;
+            } else {
+                ch_cfg->max_sessions = 1;
+            }
+
             config->channel_count++;
         }
     }
@@ -886,15 +895,10 @@ int main(int argc, char *argv[])
      * ================================================================ */
     for (int i = 0; i < ctx.config.channel_count; i++) {
         channel_config_t *ch_cfg = &ctx.config.channels[i];
-        channel_role_t role;
 
-        if (ctx.config.node_type == NODE_TYPE_FRONTEND) {
-            role = CHANNEL_ROLE_INITIATOR;
-        } else {
-            role = CHANNEL_ROLE_RESPONDER;
-        }
-
-        channel_t *ch = channel_create(&ctx, ch_cfg->channel_id, role,
+        /* 统一使用 LISTENER 角色 — 不发 SYN，仅作为配置载体 */
+        channel_t *ch = channel_create(&ctx, ch_cfg->channel_id,
+                                        CHANNEL_ROLE_LISTENER,
                                         ch_cfg->listen_port, ch_cfg->remote_port,
                                         ch_cfg->listen_addr, ch_cfg->remote_addr,
                                         ch_cfg->is_tcp);
@@ -911,7 +915,11 @@ int main(int argc, char *argv[])
         memcpy(ch->peer_mac,  ctx.peer_mac,  ETH_MAC_ADDR_LEN);
         ch->ethertype = ctx.ethertype;
 
-        /* 启动代理：frontend代理模式监听本地端口，backend代理在连接建立后处理 */
+        /* Listener 通道：设置防护标志，存储 array index（用于 alloc_channel_id） */
+        ch->flags        = CH_FLAG_STATIC_LISTENER;
+        ch->listener_idx = (uint8_t)i;
+
+        /* 启动代理：frontend 节点监听本地端口 */
         if (ctx.config.node_type == NODE_TYPE_FRONTEND) {
             if (proxy_start_listen(&ctx, ch) != 0) {
                 LOG_ERROR("Failed to start listen for channel id=%u",

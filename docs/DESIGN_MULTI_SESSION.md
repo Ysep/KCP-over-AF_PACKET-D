@@ -272,7 +272,7 @@ if (!ch->is_tcp) {
 - **无需改动 AF_PACKET 帧格式**（`channel_id` 字段已在 MyProto 协议中，16bit）
 - **无需改动 KCP 集成**（读写接口不变，只有 channel 数量变化）
 - **配置向后兼容**（旧配置只有一个 channel，外加 256 并发上限，行为与现在一致）
-- **对端无需升级**（dynamic_initiator 发出的 SYN 对 responder 来说就是正常 SYN）
+- **两端需同步升级**（动态通道 ID 在 257+ 范围，旧后端无法通过 channel_lookup_config 找到目标地址）
 
 ### 12. 需修复的代码缺陷（更新）
 
