@@ -30,9 +30,9 @@ client3 ──▶ accept ──▶ chan3 (KCP#3) ──▶ AF_PACKET    ← 新�
 
 | 角色 | 现在（单会话） | 改造后（多会话） |
 |------|--------------|-----------------|
-| **listen_fd** | 属于 static_channel，`local_fd` 唯一 | 属于 static_channel，**仅用于 accept** |
-| **static_channel** | 承载连接状态 | 变为 **listener**（不承载数据） |
-| **dynamic_channel** | 仅 peer SYN 触发创建（responder） | 也由本地 accept 触发创建（initiator） |
+| **listen_fd** | 属于静态通道，`local_fd` 唯一 | 属于 listener 通道，**仅用于 accept** |
+| **静态通道** | 承载连接状态 | 变为 **listener**（不承载数据） |
+| **动态通道** | 仅 peer SYN 触发创建（responder） | 也由本地 accept 触发创建（initiator） |
 | **channel_id** | 固定 = 配置值 | 动态分配，需要 ID 池管理 |
 
 ### 2. 配置语义变化
@@ -50,16 +50,16 @@ client3 ──▶ accept ──▶ chan3 (KCP#3) ──▶ AF_PACKET    ← 新�
 }
 ```
 
-`channel_id` 不再用于实际数据通道传输。它作为 listen_fd 的标识。实际数据通道的 channel_id 动态分配。
+`channel_id` 配置值仅用作 listener 标识。实际数据帧中传输的 `channel_id` 是动态分配的 ID。**配置 `channel_id` 不在数据帧中出现。**
 
 **`max_sessions` 默认值**：
 - `max_sessions` 未设置或为 0 → 默认 `1`（向后兼容单会话行为）
 - `max_sessions >= 2` → 启用多会话，每个新 accept 创建动态通道
-- `max_sessions <= 255`（每个 listener 的 256 ID 硬上限减自身 1）
+- `max_sessions <= 256`（每个 listener 的数据 ID 池为 256 个，不受 listener ID 占用）
 
 ```
 现有配置（无 max_sessions）：等价于 max_sessions=1，行为不变
-新配置（max_sessions=256）：支持 255 并发 + 1 个 listener
+新配置（max_sessions=256）：支持 256 并发 + 1 个 listener
 ```
 
 ### 3. channel_id 管理
@@ -110,6 +110,7 @@ if (listener_idx < g_ctx->config.channel_count) {
 
 ```c
 /* proxy_accept() 改造 */
+/* listener_idx: 此 listener 在 config.channels[] 中的 array index */
 int proxy_accept(global_ctx_t *ctx, channel_t *listener)
 {
     while (1) {
@@ -117,7 +118,7 @@ int proxy_accept(global_ctx_t *ctx, channel_t *listener)
                             SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_fd < 0) break;  /* EAGAIN */
 
-        uint16_t new_id = alloc_channel_id(ctx, listener->channel_id);
+        uint16_t new_id = alloc_channel_id(ctx, listener->listener_idx);
         if (new_id == 0) {
             close(client_fd);
             LOG_WARN("proxy_accept: channel ID exhausted for listener %u",
@@ -158,12 +159,11 @@ int proxy_accept(global_ctx_t *ctx, channel_t *listener)
 ```
                     frontend                           backend
                         │                                │
-  client1 ────TCP──────▶│  local_fd=5                     │
-                        │  chan_id=256 ──SYN──▶ AF_PACKET │
-                        │                    ┌───────────▶│  chan_id=256
+  client1 ────TCP──────▶│  chan_id=257 ──SYN──▶ AF_PACKET │
+                        │                    ┌───────────▶│  chan_id=257
                         │                    │            │  connect──▶ 目标服务
                         │  local_fd=6         │            │
-  client2 ────TCP──────▶│  chan_id=257 ──SYN─┘            │  chan_id=257
+  client2 ────TCP──────▶│  chan_id=258 ──SYN─┘            │  chan_id=258
                         │                                 │  connect──▶ 目标服务
 ```
 
@@ -205,7 +205,7 @@ if (base_idx < g_ctx->config.channel_count) {
 
 | 特性 | INITIATOR | RESPONDER | LISTENER |
 |------|-----------|-----------|----------|
-| 自动发 SYN | ✅ 创建后立即发 | ❌ | ❌ |
+| 自动发 SYN | ✅ 创建后立即发（配置 INITIATOR）<br>❌ accept 创建的 INITIATOR（由 proxy_accept 触发） | ❌ | ❌ |
 | 绑定 local_fd | ✅ | ❌（由 proxy_connect 分配） | ❌ |
 | 绑定 listen_fd | ❌ | ✅（backend 模式） | ✅ |
 | 自动销毁 | ❌（正常 FIN 后） | ❌（正常 FIN 后） | ❌（永不，仅 shutdown） |
@@ -217,11 +217,8 @@ for each cfg in config.channels:
     ch = channel_create(ctx, cfg.channel_id, CHANNEL_ROLE_LISTENER, ...)
     if (ch) {
         ch->flags |= CH_FLAG_STATIC_LISTENER;
-        if (cfg.max_sessions == 1) {
-            proxy_start_listen(ctx, ch);  // 单会话：现有行为
-        } else {
-            proxy_start_listen(ctx, ch);  // 多会话：仅监听，不连接
-        }
+        ch->listener_idx = i;  /* 存储 array index 用于 alloc_channel_id */
+        proxy_start_listen(ctx, ch);  /* 创建 listen_fd，开始监听 */
     }
 ```
 
@@ -249,9 +246,9 @@ for each cfg in config.channels:
 | 通道 ID 耗尽 | accept 返回错误，日志告警 | — |
 | **listen_fd 错误** | `LOG_ERROR` + `close(listen_fd)` → 重新 `socket/bind/listen` → 恢复监听 | listener 通道 |
 
-**关键区别：listener 通道不会被 `channel_destroy` 销毁。** 其 `listen_fd` 仅由自身错误处理逻辑关闭和重建。`channel_destroy()` 添加 listener/dynamic 区分。
+**关键区别：listener 通道不会被 `channel_destroy` 销毁。** 其 `listen_fd` 仅由自身错误处理逻辑关闭和重建。`channel_destroy()` 添加 `!(ch->flags & CH_FLAG_STATIC_LISTENER)` 防护。`channel_timeout_check()` 同样跳过 listener 通道（检查 `CH_FLAG_STATIC_LISTENER` 标志），防止意外误杀。
 
-### 10. UDP 设计 设计
+### 10. UDP 设计
 
 UDP（`is_tcp: false`）的 `listen_fd == local_fd`（共用同一个套接字），未做客户端级区分。
 
@@ -305,10 +302,10 @@ if (!ch->is_tcp) {
 
 ```diff
 -    cfg = channel_lookup_config(hdr->channel_id);
-+    /* 动态 ID: 用 channel_id/256 映射到 listener，从 listener 取目标地址 */
-+    uint16_t base_idx = hdr->channel_id / 256;
-+    cfg = (base_idx < g_ctx->config.channel_count)
-+          ? &g_ctx->config.channels[base_idx] : NULL;
++    /* 动态 ID: 用 (data_id - 257) / 256 映射到 listener 的 array index */
++    uint16_t base_idx = (hdr->channel_id - 257) / 256;
++    if (base_idx < g_ctx->config.channel_count)
++        cfg = &g_ctx->config.channels[base_idx];
 ```
 
 **N3: accept 失败路径泄漏** (proxy.c take-``diff
@@ -330,11 +327,11 @@ if (!ch->is_tcp) {
 
 | # | 步骤 | 文件 | 改动 | 风险 | 依赖 |
 |---|------|------|------|------|------|
-| 1 | `CH_FLAG_STATIC_LISTENER` + destroy 防护 | `types.h` / `channel.c` | 5 行 | 低 | — |
+| 1 | `CH_FLAG_STATIC_LISTENER` + `listener_idx` 字段 + destroy 防护 | `types.h` / `channel.c` | 8 行 | 低 | — |
 | 2 | 新增 `CHANNEL_ROLE_LISTENER`（不发 SYN） | `types.h` / `channel.c` | 5 行 | 低 | — |
 | 3 | listen_fd 错误恢复（epoll_del + 重建） | `proxy.c` | 8 行 | 低 | #1 |
-| 4 | `alloc_channel_id` ID 池（array index 分区） | `channel.c` | 35 行 | 低 | — |
-| 5 | SYN handler：RESPONDER 目标地址继承（array index 反向映射） | `channel.c` | 5 行 | 低 | #4 |
+| 4 | `alloc_channel_id` ID 池（array index 分区） | `channel.c` | 35 行 | **中** | — |
+| 5 | SYN handler：RESPONDER 目标地址继承（array index 反向映射） | `channel.c` | 5 行 | **中** | #4 |
 | 6 | `proxy_accept` 多会话 + 泄漏修复 | `proxy.c` | 30 行 | 中 | #4, #5 |
 | 7 | listener 通道 init（`CH_FLAG_STATIC_LISTENER` + `CHANNEL_ROLE_LISTENER`） | `main.c` | 5 行 | 低 | #1, #2 |
 | 8 | ACK 移到 connect 成功后 | `channel.c` | 5 行 | 低 | #5 |
