@@ -339,3 +339,67 @@ if (!ch->is_tcp) {
 | 10 | `next_dynamic_channel_id` 字段 + 初始化 | `types.h` / `main.c` | 3 行 | 低 | #4 |
 | 11 | 测试：256 并发 TCP | `tests/` | 60 行 | 低 | #1-#10 |
 | 12 | listener 在 shutdown 中统一清理 | `channel.c` | 3 行 | 低 | #2 |
+
+---
+
+# Part II: 动态通道配置热重载
+
+## 1. 背景与目标
+
+当前 `config_reload()`（SIGHUP）仅支持软参数，通道 `channels[]` 增删改必须重启。
+
+**目标**：reload 后新增/修改/删除 listener，已有动态通道不受影响。
+
+## 2. 数据结构
+
+- 无需新增结构体字段
+- 新增宏 `CH_FLAG_RELOAD_MARKED 0x02`（临时标记位）
+
+## 3. 新增函数
+
+| 函数 | 位置 | 用途 |
+|------|------|------|
+| `proxy_stop_listen()` | proxy.c | 关闭 listen_fd + epoll_del，不销毁子通道 |
+| `proxy_port_probe()` | proxy.c | bind 预检端口可用性 |
+| `proxy_port_conflict()` | proxy.c | 检测端口与已有 listener 冲突 |
+| `channel_config_changed()` | channel.c | 比较新旧配置差异 |
+| `channel_update_config()` | channel.c | 写入新配置（不碰 KCP） |
+| `config_reload_channels()` | main.c | 核心：diff 旧/新 channels[]，增删改 |
+
+## 4. config_reload_channels() 流程
+
+### Step 1: 标记
+遍历哈希表 → 所有 `CH_FLAG_STATIC_LISTENER` 通道打上 `RELOAD_MARKED`
+
+### Step 2: Diff + 增/改
+遍历新配置 `new_cfg->channels[]`：
+- **匹配 + 禁用** (`enabled=false`)：清除 `STATIC_LISTENER` → `channel_destroy`
+- **匹配 + 变更**：端口预检 → `proxy_stop_listen` → `channel_update_config` → `proxy_start_listen`
+- **匹配 + 无变更**：仅更新 `listener_idx`
+- **不匹配 + 启用**：新建 `CHANNEL_ROLE_LISTENER` → `proxy_start_listen`（端口冲突检测）
+
+### Step 3: 清理
+仍带 `RELOAD_MARKED` 的 listener → 删除。`channel_destroy` 销毁。
+
+### Step 4: 刷新 channels[]
+不物理删除 disabled 条目（保护 listener_idx 映射）。被删除条目保留、标记 `enabled=false`。
+
+## 5. 操作影响矩阵
+
+| 操作 | 存量动态通道 | 旧 listener | 新 listener |
+|------|------------|-------------|-------------|
+| 新增通道 | 不受影响 | — | 创建监听 |
+| 修改通道 | 不受影响 | 关闭重建 | 预检后创建 |
+| 删除/禁用 | 继续至自然结束 | 销毁 | — |
+
+## 6. 改动量
+
+| 文件 | 行数 |
+|------|------|
+| `types.h` | +2 |
+| `channel.h` / `channel.c` | +52 |
+| `proxy.h` / `proxy.c` | +98 |
+| `main.c` | +150 |
+| **合计** | **~302** |
+
+零新文件，零删除现有代码。
