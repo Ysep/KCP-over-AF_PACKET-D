@@ -687,7 +687,6 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
         if ((hdr->flags & MPF_CTRL_MASK) == MPF_PING) {
             LOG_DEBUG("channel_process_frame: global PING, responding PONG");
             channel_send_heartbeat_ctrl(ctx, MPF_PONG);
-            ctx->last_global_heartbeat = now;
             return 0;
         } else if ((hdr->flags & MPF_CTRL_MASK) == MPF_PONG) {
             LOG_DEBUG("channel_process_frame: global PONG received");
