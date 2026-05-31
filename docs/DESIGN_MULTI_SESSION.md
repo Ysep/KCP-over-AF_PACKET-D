@@ -363,7 +363,7 @@ if (!ch->is_tcp) {
 | `proxy_port_probe()` | proxy.c | bind 预检端口可用性 |
 | `proxy_port_conflict()` | proxy.c | 检测端口与已有 listener 冲突 |
 | `channel_config_changed()` | channel.c | 比较新旧配置差异 |
-| `channel_update_config()` | channel.c | 写入新配置（不碰 KCP） |
+| `channel_update_config()` | channel.c | 写入新配置（不碰 KCP/运行时状态），**含 source_port_min/max** |
 | `config_reload_channels()` | main.c | 核心：diff 旧/新 channels[]，增删改 |
 
 ## 4. config_reload_channels() 流程
@@ -374,15 +374,20 @@ if (!ch->is_tcp) {
 ### Step 2: Diff + 增/改
 遍历新配置 `new_cfg->channels[]`：
 - **匹配 + 禁用** (`enabled=false`)：清除 `STATIC_LISTENER` → `channel_destroy`
-- **匹配 + 变更**：端口预检 → `proxy_stop_listen` → `channel_update_config` → `proxy_start_listen`
-- **匹配 + 无变更**：仅更新 `listener_idx`
-- **不匹配 + 启用**：新建 `CHANNEL_ROLE_LISTENER` → `proxy_start_listen`（端口冲突检测）
+- **匹配 + 变更**：端口预检 → `proxy_stop_listen` → `channel_update_config` → `proxy_start_listen`。**注意**：`remote_addr`/`remote_port` 变更仅对新 RESPONDER 生效，存量动态通道保留创建时的地址
+- **匹配 + 无变更**：仅更新 `listener_idx`（**仅作用于 STATIC_LISTENER 通道，不碰动态数据通道**）
+- **不匹配 + 启用**：新建 `CHANNEL_ROLE_LISTENER` → `proxy_start_listen`（端口冲突检测）。**创建前**端口冲突检测，**创建失败**直接 `channel_destroy` 清理。`proxy_start_listen` 失败后同样 `channel_destroy`，不留"无 listener 空壳"
 
 ### Step 3: 清理
 仍带 `RELOAD_MARKED` 的 listener → 删除。`channel_destroy` 销毁。
 
 ### Step 4: 刷新 channels[]
-不物理删除 disabled 条目（保护 listener_idx 映射）。被删除条目保留、标记 `enabled=false`。
+不物理删除 disabled 条目（保护 `listener_idx` 映射和 source_port 归还路径）。
+被删除条目保留在数组中、标记 `enabled=false`。
+**`channel_update_config()` 需同步更新 `source_port_min/max` 字段**，确保 reload 后 source_port 池信息与配置一致。
+
+**索引稳定性说明**：动态数据通道通过 `(id-257)/256` 反向映射到 `channels[]` 索引。
+保留 disabled 条目可确保已有动态通道的 source_port 归还路径不因数组收缩而错位。
 
 ## 5. 操作影响矩阵
 
