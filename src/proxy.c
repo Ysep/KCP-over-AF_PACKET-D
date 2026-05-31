@@ -203,9 +203,13 @@ static int resolve_addr(const char *addr_str, uint16_t port,
     return -1;
 }
 
-/*
- * 初始化代理子系统
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_init — 初始化代理子系统
+ *
+ * 创建 epoll 实例 (epoll_create1 with EPOLL_CLOEXEC)。
+ * 保存全局上下文指针 g_ctx，供 proxy_connect_remote() 等不需要 ctx 参数
+ * 的函数访问 epoll_fd。
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_init(global_ctx_t *ctx)
 {
     if (!ctx) {
@@ -244,9 +248,20 @@ void proxy_shutdown(global_ctx_t *ctx)
     g_ctx = NULL;
 }
 
-/*
- * 为通道创建监听套接字并注册到 epoll
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_start_listen — 为通道创建监听套接字并注册到 epoll
+ *
+ * 同时支持 TCP 和 UDP 两种协议：
+ *   TCP 路径：socket() → setsockopt(IPV6_V6ONLY, SO_REUSEADDR) → bind() → listen()
+ *            → epoll_ctl(ADD, EPOLLIN, level-triggered)
+ *            监听套接字使用 level-triggered 模式，防止高并发下丢失连接。
+ *   UDP 路径：socket() → setsockopt(IPV6_V6ONLY, SO_REUSEADDR) → bind()
+ *            → epoll_ctl(ADD, EPOLLIN|EPOLLET, edge-triggered)
+ *            由于 UDP 无连接，listen_fd 和 local_fd 指向同一个套接字。
+ *
+ * IPv6 双栈：优先 IPv6 (AF_INET6)，设置 IPV6_V6ONLY=0 以支持 IPv4 映射地址，
+ *            实现单套接字同时处理 IPv4/IPv6 流量。
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
 {
     int                     fd;
@@ -390,9 +405,23 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
     return 0;
 }
 
-/*
- * 接受监听套接字上的新 TCP 连接
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_accept — 接受监听套接字上的新 TCP 连接
+ *
+ * 两阶段 accept 循环（兼容 edge-triggered epoll）：
+ *   1. accept4() 循环直到 EAGAIN，一次性消费所有待处理连接。
+ *   2. 设置 TCP_NODELAY（禁用 Nagle）+ SO_KEEPALIVE（检测死连接）。
+ *
+ * 多会话模式 (STATIC_LISTENER + max_sessions > 1)：
+ *   - 通过 alloc_channel_id() 分配新的动态 channel_id
+ *   - channel_create() 创建新的动态通道（INITIATOR 角色）
+ *   - 复制网络层信息（raw_sock, ifindex, ethertype, local/peer MAC）
+ *   - 将 client_fd 注册到 epoll 并返回继续 accept
+ *
+ * 单会话模式（默认/fallback）：
+ *   - 将 client_fd 直接绑定到当前通道 ch->local_fd
+ *   - 若通道已有活跃连接则关闭多余连接（每通道同一时间只服务一个客户端）
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_accept(global_ctx_t *ctx, channel_t *ch)
 {
     int client_fd;
@@ -536,9 +565,23 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
     return -1;
 }
 
-/*
- * 连接到远端服务（backend代理模式）
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_connect_remote — 连接到远端服务（backend 代理模式）
+ *
+ * 使用场景：backend 节点从 AF_PACKET 收到帧后，需要将数据转发到本地服务。
+ *
+ * 连接流程：
+ *   1. resolve_addr() — 解析远端地址，优先 IPv6 回退 IPv4
+ *   2. socket() — 创建非阻塞 TCP/UDP 套接字 (SOCK_NONBLOCK|SOCK_CLOEXEC)
+ *   3. setsockopt(TCP_NODELAY) — 禁用 Nagle 算法确保低延迟（仅 TCP）
+ *   4. 关闭旧 local_fd — 若通道已有旧连接，先从 epoll 移除并关闭
+ *   5. connect() — 非阻塞连接，TCP 可能返回 EINPROGRESS
+ *   6. epoll_ctl(ADD, EPOLLIN|EPOLLOUT|EPOLLET) — 加入 epoll 监控
+ *      包含 EPOLLOUT：对于 TCP，connect 返回 EINPROGRESS 时，连接完成
+ *      表现为套接字可写；对于 UDP，sendto 立即可用。
+ *
+ * 返回值：成功返回 fd, 失败返回 -1
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_connect_remote(channel_t *ch)
 {
     int                     fd;
@@ -880,9 +923,25 @@ int proxy_flush_to_local(channel_t *ch)
     return 0;
 }
 
-/*
- * 将数据从 KCP 写入本地套接字
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_write_to_local — 将数据从 KCP 写入本地套接字（带缓冲管理）
+ *
+ * 三级缓冲策略，保证数据顺序和可靠性：
+ *
+ *   1. recv_buf 有积压 → 新数据追加到 recv_buf 尾部（保证顺序）
+ *      若溢出则报错返回 -1。
+ *
+ *   2. recv_buf 为空 → 尝试直接 write()/sendto()
+ *      - 全部写入成功 → 返回写入字节数
+ *      - write() 返回 EAGAIN → 缓冲到 recv_buf，通过 proxy_ensure_epollout()
+ *        确保 EPOLLOUT 已注册，等待下次可写通知
+ *      - 部分写入（nwritten < len）→ 剩余数据移入 recv_buf，注册 EPOLLOUT
+ *
+ *   TCP 路径：write() 直接写入
+ *   UDP 路径：sendto() 发送到远端地址（通过 resolve_addr 解析）
+ *
+ *   错误处理：EINTR（被信号中断）→ 转为缓冲模式；其他错误 → 返回 -1
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
 {
     ssize_t nwritten;
@@ -1021,9 +1080,24 @@ int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
     return (int)nwritten;
 }
 
-/*
- * 关闭通道的本地连接
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_close_local — 关闭通道的本地连接
+ *
+ * 分两步清理（处理 TCP 场景下 listen_fd 和 local_fd 是不同的套接字）：
+ *
+ *   1. 关闭 local_fd（数据连接）：
+ *      - 从 epoll 移除 → close()
+ *      - 若 listen_fd == local_fd（UDP），一并清除 listen_fd
+ *
+ *   2. 关闭 listen_fd（监听套接字，仅 TCP）：
+ *      - 仅当 listen_fd 与 local_fd 不同时才关闭
+ *      - 从 epoll 移除 → close()
+ *
+ *   3. 清空 recv_buf_len（丢弃未发送的数据）
+ *
+ * 对比 proxy_stop_listen()：本函数是完整关闭（数据连接+监听），
+ * proxy_stop_listen() 仅关闭监听套接字，保留 local_fd 和 recv_buf。
+ * ────────────────────────────────────────────────────────────────────────── */
 void proxy_close_local(channel_t *ch)
 {
     global_ctx_t *ctx;
@@ -1072,10 +1146,17 @@ void proxy_close_local(channel_t *ch)
     ch->recv_buf_len = 0;
 }
 
-/*
- * 关闭 listener 的 listen_fd（不销毁动态子通道）。
- * 与 proxy_close_local() 的区别：不关闭 local_fd，不清空 recv_buf。
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_stop_listen — 优雅关闭 listener 的 listen_fd（不销毁动态子通道）
+ *
+ * 与 proxy_close_local() 的关键区别：
+ *   - 只关闭 listen_fd，不关闭 local_fd
+ *   - 不清空 recv_buf（子通道可能还有待发送的数据）
+ *   - 不修改 local_fd（多会话模式下动态子通道仍保持活跃连接）
+ *
+ * 用途：配置热重载时临时关闭旧监听端口，再在新端口重新监听。
+ *       保证已建立的子通道不受影响，仅阻止新的入站连接。
+ * ────────────────────────────────────────────────────────────────────────── */
 void proxy_stop_listen(global_ctx_t *ctx, channel_t *ch)
 {
     if (!ctx || !ch) return;
@@ -1092,10 +1173,20 @@ void proxy_stop_listen(global_ctx_t *ctx, channel_t *ch)
     }
 }
 
-/*
- * 探测端口是否可用于监听（bind 测试，成功后立即关闭）。
- * @return 0=可用, -1=不可用
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_port_probe — bind 测试机制，用于热重载前端口可用性预检
+ *
+ * 原理：创建临时套接字 → SO_REUSEADDR → bind() → 立即 close()
+ *       如果 bind 成功，说明端口未被占用，新监听可安全启动。
+ *
+ * 用途：config_reload_channels() 中，修改通道配置前先探测新端口是否可用。
+ *       避免因端口冲突导致旧监听已关闭、新监听又失败的双输局面。
+ *
+ * @param addr    监听地址（如 "0.0.0.0" 或 "::"）
+ * @param port    监听端口
+ * @param is_tcp  1=TCP, 0=UDP
+ * @return        0=端口可用, -1=端口不可用
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_port_probe(const char *addr, uint16_t port, int is_tcp)
 {
     int                     family;
@@ -1124,10 +1215,20 @@ int proxy_port_probe(const char *addr, uint16_t port, int is_tcp)
     return 0;
 }
 
-/*
- * 检查端口是否已被其他 listener 通道占用。
- * @return 1=有冲突, 0=无冲突
- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_port_conflict — 扫描哈希表检测端口冲突
+ *
+ * 遍历 channel_hash 中的所有通道，检查是否存在活跃的 STATIC_LISTENER
+ * 占用了相同的 listen_addr + listen_port 组合。
+ *
+ * 排除条件：
+ *   - ch->channel_id == exclude_id（允许同一通道重绑定相同端口）
+ *   - ch->flags 不包含 CH_FLAG_STATIC_LISTENER（动态子通道不占用监听端口）
+ *   - ch->listen_fd < 0（已关闭的监听不参与冲突检测）
+ *
+ * @param exclude_id  排除的 channel_id（通常为当前正在检查的通道自身）
+ * @return 1=有冲突（端口已被其他通道占用），0=无冲突
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_port_conflict(global_ctx_t *ctx, const char *listen_addr,
                          uint16_t listen_port, uint32_t exclude_id)
 {
@@ -1169,12 +1270,23 @@ uint32_t proxy_get_events(channel_t *ch)
     return events;
 }
 
-/*
- * 处理 epoll 事件分发到代理
+/* ──────────────────────────────────────────────────────────────────────────
+ * proxy_handle_event — epoll 事件分发器
  *
- * 这是主事件分发器，从 epoll 事件中识别 fd 对应的通道和角色，
- * 然后将事件路由到相应的处理函数。
- */
+ * 这是整个代理模块的核心事件路由函数。根据 fd 角色分两条路径：
+ *
+ *   【listen_fd 路径】（仅 TCP，listen_fd ≠ local_fd）
+ *     EPOLLERR/EPOLLHUP → 重建监听套接字（STATIC_LISTENER）或关闭通道
+ *     EPOLLIN          → proxy_accept() 接受新连接
+ *
+ *   【local_fd 路径】（TCP 数据连接 / UDP 统一套接字）
+ *     EPOLLERR/EPOLLHUP → proxy_close_local() + RST 控制帧
+ *     EPOLLIN           → proxy_handle_local_read() 读取→KCP 方向
+ *     EPOLLOUT          → proxy_handle_local_write() KCP→写入方向
+ *                         写入完成后若 recv_buf 清空，移除 EPOLLOUT 减少无谓通知
+ *
+ * fd 查找：通过 proxy_find_channel_by_fd() 扫描哈希表，O(n)。
+ * ────────────────────────────────────────────────────────────────────────── */
 int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
 {
     channel_t *ch;

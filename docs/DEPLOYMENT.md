@@ -11,9 +11,10 @@
 3. [配置文件详解](#3-配置文件详解)
 4. [示例拓扑部署](#4-示例拓扑部署)
 5. [作为 systemd 服务运行](#5-作为-systemd-服务运行)
-6. [日志与监控](#6-日志与监控)
-7. [故障排查](#7-故障排查)
-8. [性能调优](#8-性能调优)
+6. [SIGUSR1 通道控制](#6-sigusr1-通道控制)
+7. [日志与监控](#7-日志与监控)
+8. [故障排查](#8-故障排查)
+9. [性能调优](#9-性能调优)
 
 ---
 
@@ -632,7 +633,159 @@ sudo systemctl status kcp-afpacket
 
 ---
 
-## 6. 日志与监控
+## 6. SIGUSR1 通道控制
+
+### 概述
+
+KCP-over-AF_PACKET 支持通过 **SIGUSR1 信号** 在运行时动态添加或删除通道，无需重启服务或中断现有连接。这通过一个独立的 **通道控制文件**（`config-ctl.json`）实现。
+
+### 工作原理
+
+1. 向进程发送 `SIGUSR1` 信号（`kill -USR1 <pid>`）
+2. 主事件循环中的信号处理器捕获该信号，设置 `ctl_requested = 1`
+3. 在下一个 epoll 周期中，`handle_channel_ctl()` 被调用
+4. 函数查找与主配置文件同目录的 `config-ctl.json`（例如配置文件为 `/etc/kcp/config.json`，则控制文件为 `/etc/kcp/config-ctl.json`）
+5. 解析控制文件中的 JSON 数组，逐条执行添加或删除操作
+6. 处理完成后删除控制文件（原子操作，避免重复执行）
+
+### 控制文件格式
+
+控制文件是一个 JSON 数组，每个元素描述一个通道操作：
+
+```json
+[
+    {
+        "action": "add",
+        "channel_id": 10,
+        "listen_port": 9090,
+        "remote_port": 9090,
+        "listen_addr": "127.0.0.1",
+        "remote_addr": "192.168.1.100",
+        "is_tcp": true,
+        "max_sessions": 16
+    },
+    {
+        "action": "delete",
+        "channel_id": 5
+    }
+]
+```
+
+### 操作说明
+
+#### 添加通道 (`"action": "add"`)
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:--:|------|
+| `action` | string | 是 | 固定值 `"add"` |
+| `channel_id` | integer | 是 | 新通道 ID，不可与已有 listener 冲突 |
+| `listen_port` | integer | 是 | 本地监听端口 |
+| `remote_port` | integer | 是 | 远端目标端口 |
+| `listen_addr` | string | 否 | 监听地址，默认 `"127.0.0.1"` |
+| `remote_addr` | string | 是 | 远端目标地址 |
+| `is_tcp` | boolean | 否 | TCP=true, UDP=false, 默认 true |
+| `max_sessions` | integer | 否 | 最大并发会话数，默认 1 |
+
+**前置条件**：
+- Frontend 节点（`node_type: "frontend"`）
+- `listen_port` 未被占用
+- `channel_id` 不与现有 listener 冲突
+- 哈希表有可用槽位（`max_channels` 未达上限）
+
+#### 删除通道 (`"action": "delete"`)
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:--:|------|
+| `action` | string | 是 | 固定值 `"delete"` |
+| `channel_id` | integer | 是 | 要删除的 listener 通道 ID |
+
+**行为**：
+- 停止该 listener 的监听
+- 清除 `CH_FLAG_STATIC_LISTENER` 标志
+- 销毁通道及其所有动态子会话
+- 在主配置中将该通道标记为 `enabled: false`
+
+### 使用示例
+
+```bash
+# 1. 创建控制文件
+cat > /etc/kcp/config-ctl.json << 'EOF'
+[
+    {
+        "action": "add",
+        "channel_id": 20,
+        "listen_port": 9020,
+        "remote_port": 22,
+        "listen_addr": "127.0.0.1",
+        "remote_addr": "10.0.0.5",
+        "is_tcp": true,
+        "max_sessions": 4
+    }
+]
+EOF
+
+# 2. 发送信号
+PID=$(cat /var/run/kcp-afpacket.pid)
+sudo kill -USR1 $PID
+
+# 3. 检查日志确认
+sudo journalctl -u kcp-afpacket -n 5
+# 预期输出: [INFO] ctl: channel 20 added
+
+# 4. 验证控制文件已被处理（自动删除）
+ls /etc/kcp/config-ctl.json 2>&1
+# 预期: No such file or directory
+```
+
+### 删除示例
+
+```bash
+cat > /etc/kcp/config-ctl.json << 'EOF'
+[
+    {
+        "action": "delete",
+        "channel_id": 20
+    }
+]
+EOF
+
+sudo kill -USR1 $(cat /var/run/kcp-afpacket.pid)
+```
+
+### 批量操作
+
+控制文件支持数组格式，可一次执行多个添加/删除操作：
+
+```json
+[
+    {"action": "add",    "channel_id": 30, "listen_port": 9030, "remote_port": 80,  "listen_addr": "127.0.0.1", "remote_addr": "192.168.1.1", "is_tcp": true},
+    {"action": "add",    "channel_id": 31, "listen_port": 9031, "remote_port": 443, "listen_addr": "127.0.0.1", "remote_addr": "192.168.1.1", "is_tcp": true},
+    {"action": "delete", "channel_id": 10}
+]
+```
+
+### 与 SIGHUP 配置热重载的区别
+
+| 特性 | SIGUSR1 通道控制 | SIGHUP 配置重载 |
+|------|:--:|:--:|
+| 触发信号 | `SIGUSR1` | `SIGHUP` |
+| 控制文件 | `config-ctl.json`（临时） | `config.json`（主配置） |
+| 操作粒度 | 单个通道增/删 | 全量 diff 增/改/删 |
+| 文件自动清理 | 是（处理后删除） | 否（主配置保留） |
+| 适用场景 | 运维临时调整 | 配置变更部署 |
+| systemd 命令 | `kill -USR1` | `systemctl reload` |
+
+### 注意事项
+
+- 控制文件必须是合法 JSON 数组；格式错误将静默跳过（日志记录 ERROR）
+- 添加通道时端口冲突会导致该条操作被跳过，不影响其他操作
+- 删除不存在的 `channel_id` 会静默跳过
+- 删除操作仅针对 listener 通道（`CH_FLAG_STATIC_LISTENER`），动态子会话不直接删除
+- 控制文件会在处理后被删除以保持幂等性
+
+---
+
+## 7. 日志与监控
 
 ### 日志输出
 
@@ -710,7 +863,7 @@ fi
 
 ---
 
-## 7. 故障排查
+## 8. 故障排查
 
 ### 常见问题
 
@@ -852,7 +1005,7 @@ strace -p $(pgrep kcp-afpacket) -f -e trace=network
 
 ---
 
-## 8. 性能调优
+## 9. 性能调优
 
 ### KCP 参数调优
 
@@ -921,4 +1074,157 @@ sudo ip link set eth0 mtu 9000
 
 # 实例 2（不同 EtherType）
 ./kcp-afpacket config-2.json &
+```
+
+### max_channels 配置（50000+ 监听器）
+
+`max_channels` 参数控制哈希表桶数和最大通道数上限。源码中 `MAX_CHANNELS` 定义为 **65536**，支持大规模监听器部署。
+
+#### 配置说明
+
+| 配置项 | 默认值 | 范围 | 说明 |
+|--------|-------|------|------|
+| `max_channels` | `65536` | `1` ~ `65536` | 哈希表桶数 = max_channels × 2，限制 [128, 131072] |
+
+```json
+{
+    "max_channels": 65536,
+    "channels": [
+        ...
+    ]
+}
+```
+
+#### 哈希表实现
+
+- **算法**：链地址法（separate chaining）
+- **桶数**：`channel_hash_size = max_channels × 2`（限制在 [128, 131072]）
+- **查找复杂度**：O(1) 平均，O(n/桶数) 最坏
+- **性能特征**：50000 个活跃通道时，每个桶平均 0.38 个元素，查找几乎无碰撞
+
+#### 50000+ 监听器场景
+
+当配置 50000 个静态 listener 通道时：
+
+```
+max_channels = 65536
+hash_size    = 131072 桶
+listeners    = 50000
+负载因子      = 50000 / 131072 ≈ 0.38
+```
+
+**关键约束**：
+
+| 约束项 | 值 | 说明 |
+|--------|-----|------|
+| 最大 channel_id | 65535 | `uint32_t`，但动态 ID 从 65536 起分配 |
+| 静态 listener ID 范围 | 1 ~ 65535 | 占用低 16 位空间 |
+| 动态会话 ID 范围 | 65536 ~ 4294967295 | 每个 listener 独占 256 个 ID |
+| 总哈希槽位 | 131072 | 负载因子 0.38 @ 50000 listeners |
+| epoll 监听 fd 数 | 50000+ | 每个 listener 占用一个 listen_fd |
+| 系统 fd 限制 | ≥ 65536 | 需调整 `LimitNOFILE` 和 `/etc/security/limits.conf` |
+
+#### 系统配置调优
+
+```bash
+# 1. 提高文件描述符限制
+echo "fs.file-max = 200000" >> /etc/sysctl.conf
+sysctl -p
+
+# 2. 用户级别 fd 限制
+echo "kcp hard nofile 131072" >> /etc/security/limits.conf
+echo "kcp soft nofile 131072" >> /etc/security/limits.conf
+
+# 3. systemd service 中设置
+# LimitNOFILE=131072
+
+# 4. 提高 epoll 限制（通常无需调整，内核自动处理）
+# fs.epoll.max_user_watches 默认足够
+```
+
+### 内存需求估算
+
+#### 单通道内存模型
+
+每个通道（`channel_t` 结构体 + KCP 实例 + 缓冲区）的内存占用估算：
+
+| 内存组件 | 大小 | 说明 |
+|---------|------|------|
+| `channel_t` 结构体 | ~600 字节 | 含 MAC、地址、统计计数等字段 |
+| KCP 控制块 (`ikcpcb`) | ~200 字节 | KCP 协议状态 + 参数 |
+| KCP 发送队列 | `sndwnd × mtu` ≈ 1024 × 1400 = 1.4 MB | 最大窗口 × MTU |
+| KCP 接收队列 | `rcvwnd × mtu` ≈ 1024 × 1400 = 1.4 MB | 最大窗口 × MTU |
+| 通道接收缓冲区 | 8192 字节 | `CHANNEL_RECV_BUF_SIZE` |
+| 哈希表节点开销 | ~16 字节 | 链表指针 |
+| **合计（理论最大值）** | **~2.8 MB / 通道** | KCP 窗口满时 |
+
+> **注意**：以上为 KCP 窗口满载时的理论上限。空闲通道（仅 listener，无数据传输）的实际开销远小于此值。
+
+#### 空闲 listener 实际内存
+
+对于仅作为 listener 的通道（无活跃数据传输，KCP 未建立）：
+
+| 内存组件 | 大小 |
+|---------|------|
+| `channel_t` 结构体 | ~600 字节 |
+| KCP 实例（空闲） | ~200 字节 |
+| 哈希节点 | ~16 字节 |
+| **合计 / listener** | **~1 KB** |
+
+#### 50000 监听器总内存估算
+
+| 场景 | 公式 | 估算值 |
+|------|------|-------|
+| **仅 listener（空闲）** | 50000 × 1 KB | **≈ 50 MB** |
+| + 哈希表 (131072 桶 × 8 字节指针) | + 1 MB | **≈ 51 MB** |
+| + 程序代码 / libc / 栈 | + 5 MB | **≈ 56 MB** |
+| + 系统开销（fd 表、epoll） | + 8 MB | **≈ 64 MB** |
+| **保守估计（含安全余量）** | — | **≈ 70 MB** |
+
+```
+50000 listener 内存估算:
+  channel_t × 50000      =  30 MB  (600 B each)
+  KCP idle × 50000       =  10 MB  (200 B each)
+  哈希表                   =   1 MB  (131072 × 8 B)
+  fd 表 + epoll           =   8 MB
+  程序 + 库 + 栈           =   5 MB
+  安全余量                 =  16 MB
+  ─────────────────────────────────
+  合计 (RSS)              ≈  70 MB
+```
+
+#### 活跃数据传输场景
+
+当 listener 接受连接并建立动态会话后，每个活跃会话额外消耗：
+
+| 动态会话组件 | 额外内存 |
+|-------------|---------|
+| KCP 发送队列 (活跃) | ~1.4 MB (sndwnd=1024, mtu=1400) |
+| KCP 接收队列 (活跃) | ~1.4 MB (rcvwnd=1024, mtu=1400) |
+| 代理缓冲区 (64KB × 2) | ~128 KB |
+| 动态通道结构体 | ~600 字节 |
+| **合计 / 活跃会话** | **~3 MB** |
+
+因此，若 50000 个 listener 中 10%（5000 个）有活跃数据传输：
+
+```
+70 MB (基础) + 5000 × 3 MB = 70 MB + 15 GB ≈ 15 GB
+```
+
+**建议**：
+- 高并发活跃会话场景需要配备充足内存（16 GB+）
+- 仅大量 listener（少量活跃）场景：2 GB 内存足够
+- 通过 `max_sessions` 限制每个 listener 的并发连接数来控制内存峰值
+
+#### 内存监控命令
+
+```bash
+# 查看进程内存
+cat /proc/$(pgrep kcp-afpacket)/status | grep -E 'VmRSS|VmSize|VmPeak'
+
+# 或使用 smem
+smem -P kcp-afpacket
+
+# 持续监控
+watch -n 5 'ps -o pid,rss,vsz,comm -p $(pgrep kcp-afpacket)'
 ```

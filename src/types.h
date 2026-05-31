@@ -3,6 +3,21 @@
  *
  * 定义整个项目中所有模块共享的数据结构、枚举、常量和配置类型。
  * 所有其他头文件都应包含此文件。
+ *
+ * 本文件涵盖：
+ *   1. MyProto 协议常量与帧格式定义（魔数、标志位、9字节帧头）
+ *   2. 通道状态机（channel_state_t：7 状态，仿 TCP）
+ *   3. 通道角色（channel_role_t：INITIATOR/RESPONDER/LISTENER）
+ *   4. 代理节点类型（node_type_t：FRONTEND/BACKEND）
+ *   5. 配置结构体（channel_config_t, global_config_t）
+ *   6. 运行时核心结构体（channel_t, global_ctx_t）
+ *   7. 加密配置、统计计数器、日志宏、工具宏
+ *
+ * 设计原则：
+ *   - 所有结构体采用紧凑布局，减少内存占用
+ *   - 以 channel_id 为全局标识，支持最多 65536 个并发通道
+ *   - 动态通道 ID 分配采用分区机制，避免不同 listener 间冲突
+ *   - 热重载通过标志位实现增量更新，不中断现有连接
  */
 
 #ifndef TYPES_H
@@ -16,6 +31,23 @@
 /* ============================================================================
  * 常量定义
  * ============================================================================ */
+
+/* ── MyProto 协议概述 ────────────────────────────────────────────
+ * MyProto 是一个轻量级二层隧道协议，运行在 AF_PACKET 原始套接字之上。
+ *
+ * 协议栈层次：
+ *   应用数据 (TCP/UDP payload)
+ *     → KCP (可靠传输、流控、ARQ)
+ *       → MyProto (多路复用、通道管理、加密)
+ *         → AF_PACKET (原始以太网帧，绕过内核协议栈)
+ *
+ * 帧结构（从外到内）：
+ *   [Ethernet Header 14B] [MyProto Header 9B] [Optional: SM4-IV 16B]
+ *     [Payload (KCP segment)] [Optional: SM3-HMAC 32B]
+ *
+ * 控制帧（SYN/ACK/FIN/RST/PING/PONG）仅含 9B 帧头，无 payload。
+ * 数据帧含 MyProto 帧头 + KCP 段（可能加密）。
+ */
 
 /* MyProto 协议常量 */
 #define MYPROTO_MAGIC           0x4D50      /* 'MP' - 魔数，用于帧识别 */
@@ -99,22 +131,75 @@
  * 枚举类型
  * ============================================================================ */
 
+/* ── 通道状态机 ───────────────────────────────────────────────────
+ * 模仿 TCP 状态机的简化版本，用于 MyProto 通道的生命周期管理。
+ *
+ * 状态迁移图：
+ *   CLOSED ──(发送SYN)──▶ SYN_SENT ──(收到ACK)──▶ ESTABLISHED
+ *      │                      │
+ *      │                  (收到SYN,            ◀── 正常数据传输 ──▶
+ *      │                   发送ACK)
+ *      │                      ▼
+ *      └────────────── SYN_RCVD
+ *                            │
+ *                       (收到ACK)
+ *                            │
+ *                            ▼
+ *                      ESTABLISHED ──(主动关闭,发送FIN)──▶ FIN_SENT
+ *                           │                                 │
+ *                      (收到FIN,                           (收到ACK)
+ *                       发送ACK)                               │
+ *                           │                                 ▼
+ *                           ▼                            等待对端FIN
+ *                       FIN_RCVD ◀──(收到FIN,发送ACK)────────┘
+ *                           │
+ *                      (超时)
+ *                           ▼
+ *                      TIME_WAIT ──(超时)──▶ CLOSED
+ *
+ * 设计要点：
+ * - SYN_SENT/SYN_RCVD: 握手中，使用指数退避重传 SYN/ACK
+ * - ESTABLISHED: 正常通信，KCP 负责可靠传输
+ * - FIN_SENT/FIN_RCVD: 优雅关闭，允许对端完成剩余数据传输
+ * - TIME_WAIT: 防止延迟帧干扰后续新连接（2MSL 等待）
+ */
 /* 通道状态机 */
 typedef enum {
-    CHANNEL_CLOSED      = 0,    /* 关闭状态 */
+    CHANNEL_CLOSED      = 0,    /* 关闭状态：初始状态，未建立连接或已完全关闭 */
     CHANNEL_SYN_SENT    = 1,    /* 已发送 SYN，等待 ACK */
     CHANNEL_SYN_RCVD    = 2,    /* 已收到 SYN，已发送 ACK，等待确认 */
-    CHANNEL_ESTABLISHED = 3,    /* 已建立连接 */
+    CHANNEL_ESTABLISHED = 3,    /* 已建立连接：双向数据通信中 */
     CHANNEL_FIN_SENT    = 4,    /* 已发送 FIN，等待对端 FIN */
     CHANNEL_FIN_RCVD    = 5,    /* 已收到 FIN，等待本地关闭 */
-    CHANNEL_TIME_WAIT   = 6     /* 等待超时后彻底关闭 */
+    CHANNEL_TIME_WAIT   = 6     /* 等待超时后彻底关闭：防止残余帧干扰 */
 } channel_state_t;
 
 /* 通道角色 */
+/* ── 通道角色与标志位 ────────────────────────────────────────────
+ * 每个通道在握手和通信过程中扮演一种角色，决定其行为：
+ *
+ * LISTENER:   被动监听角色，仅 accept 不主动发 SYN。
+ *             用于 frontend 节点上的服务端口监听通道。
+ *             它本身不参与 KCP 数据传输，仅负责为每个新进入的连接
+ *             派生 INITIATOR/RESPONDER 子通道。
+ *
+ * INITIATOR:  主动发起方，向对端发送 SYN 建立连接。
+ *             通常由 frontend LISTENER accept 新客户端连接后创建，
+ *             或 backend 节点主动向 frontend 发起连接。
+ *
+ * RESPONDER:  被动响应方，收到 SYN 后回复 ACK。
+ *             由对端的 INITIATOR 触发创建，完成握手后进入 ESTABLISHED。
+ */
+
 /* 通道标志位 */
 #define CH_FLAG_STATIC_LISTENER 0x01        /* 静态 listener 通道（不被 destroy 销毁） */
 #define CH_FLAG_RELOAD_MARKED   0x02        /* reload 临时标记（增删改匹配用） */
 
+/* ── 通道角色枚举 ────────────────────────────────────────────────
+ * INITIATOR (0): 主动连接方 —— 发送 SYN，驱动握手流程
+ * RESPONDER (1): 被动响应方 —— 收到 SYN 后回复 ACK
+ * LISTENER  (2): 纯监听方 —— 仅 accept 本地连接，不参与对端握手
+ */
 /* 通道角色 */
 typedef enum {
     CHANNEL_ROLE_INITIATOR = 0, /* 发起方（主动连接） */
@@ -122,6 +207,22 @@ typedef enum {
     CHANNEL_ROLE_LISTENER  = 2  /* 监听方（仅 listen，不发 SYN） */
 } channel_role_t;
 
+/* ── 代理节点类型 ────────────────────────────────────────────────
+ * 决定了节点在网络拓扑中的位置和职责：
+ *
+ * FRONTEND (0): 部署在客户端侧，面向用户。
+ *   - 在本地 bind 端口，等待客户端 TCP/UDP 连接
+ *   - 将客户端数据通过 KCP-over-AF_PACKET 隧道转发到 backend
+ *   - 每个客户端连接对应一个动态 INITIATOR 通道
+ *
+ * BACKEND (1):  部署在服务端侧，面向真实服务。
+ *   - 收到 frontend 发来的隧道数据后，转发到本地实际服务端口
+ *   - 角色通常为 RESPONDER（被动接受 frontend 发起的连接）
+ *   - 一个 backend 可同时服务多个 frontend 的对等连接
+ *
+ * 典型部署拓扑：
+ *   客户端 ──TCP──▶ [FRONTEND] ──AF_PACKET──▶ [BACKEND] ──TCP──▶ 真实服务
+ */
 /* 代理模式 */
 typedef enum {
     NODE_TYPE_FRONTEND  = 0,    /* 前端节点：面向客户端，接收连接 */
@@ -138,12 +239,33 @@ typedef enum {
  * 协议头结构体
  * ============================================================================ */
 
+/* ── MyProto 帧头格式（9 字节紧凑布局）───────────────────────────
+ *
+ *   0                   1                   2                   3
+ *   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |                         channel_id                            |  4B, 通道ID
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *  |    flags      |           payload_len         |  header_crc  |  1B+2B+2B
+ *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+ *
+ * 字段说明：
+ * - channel_id (4B): 通道标识，用于多路复用/解复用，也作为哈希表键
+ * - flags      (1B): 帧标志位（MPF_SYN/ACK/FIN/RST/PING/PONG/CRYPTO）
+ * - payload_len(2B): 负载长度（不含帧头），最大 65535 字节
+ * - header_crc (2B): 帧头 CRC16 校验，防止帧头损坏导致错误路由
+ *
+ * 设计理由：
+ * - 9 字节极小开销，适合低延迟场景
+ * - __attribute__((packed)) 确保无填充，跨平台一致
+ * - header_crc 保护关键路由信息，payload 由上层 KCP 保证完整性
+ */
 /* MyProto 协议头（9 字节，紧凑打包） */
 typedef struct __attribute__((packed)) {
-    uint32_t channel_id;   /* 通道标识符 */
-    uint8_t  flags;        /* 帧标志位 */
-    uint16_t payload_len;  /* 负载长度（字节） */
-    uint16_t header_crc;   /* 头部 CRC 校验 */
+    uint32_t channel_id;   /* 通道标识符：唯一标识一个逻辑通道 */
+    uint8_t  flags;        /* 帧标志位：控制帧类型和加密标记 */
+    uint16_t payload_len;  /* 负载长度（字节）：紧随帧头的 payload 长度 */
+    uint16_t header_crc;   /* 头部 CRC 校验：防止帧头位错误 */
 } myproto_hdr_t;
 
 /* 确保协议头大小为 9 字节 */
@@ -153,6 +275,19 @@ _Static_assert(sizeof(myproto_hdr_t) == 9, "myproto_hdr_t must be 9 bytes");
  * 配置结构体
  * ============================================================================ */
 
+/* ── 单通道配置 ──────────────────────────────────────────────────
+ * 每个 channel_config_t 描述一条转发规则。
+ *
+ * channel_id:  全局唯一标识，静态配置的通道使用固定 ID，
+ *              动态通道由 next_dynamic_channel_id 分配。
+ * listen_addr/port: 本地监听端点（frontend 接受客户端连接的地址）。
+ * remote_addr/port: 远端目标端点（backend 转发到的实际服务地址）。
+ * is_tcp:      区分传输层协议，影响本地 socket 创建方式。
+ * enabled:     0=跳过此配置项（热重载时可禁用某条规则）。
+ * max_sessions: 此端口允许的最大并发会话数，0 表示使用默认值 1。
+ *               frontend 上每 accept 一个新客户端连接即创建一个 session，
+ *               达到上限后新连接将被拒绝。
+ */
 /* 单通道配置 */
 typedef struct {
     uint32_t    channel_id;                 /* 通道 ID */
@@ -161,8 +296,8 @@ typedef struct {
     char        listen_addr[MAX_LISTEN_ADDR];  /* 本地监听地址 */
     char        remote_addr[MAX_REMOTE_ADDR];  /* 远端目标地址 */
     uint8_t     is_tcp;                     /* 1=TCP, 0=UDP */
-    uint8_t     enabled;                    /* 是否启用此通道 */
-    uint16_t    max_sessions;               /* 此端口最大并发数，0=默认1 */
+    uint8_t     enabled;                    /* 是否启用此通道：0=禁用（跳过），1=启用 */
+    uint16_t    max_sessions;               /* 此端口最大并发数：0=默认1，超限拒绝新连接 */
 } channel_config_t;
 
 /* 加密配置（兼容B项目的crypto.h接口） */
@@ -236,6 +371,44 @@ typedef struct {
     uint64_t    crypto_errors;          /* 加密/解密错误数 */
 } channel_stats_t;
 
+/* ── 通道结构体 ──────────────────────────────────────────────────
+ * channel_t 是整个系统的核心数据结构，代表一条 MyProto 逻辑通道。
+ *
+ * 生命周期：
+ *   1. 静态通道：从 config.channels[] 创建，flags 含 CH_FLAG_STATIC_LISTENER
+ *   2. 动态通道：LISTENER accept 新连接或收到 SYN 时动态创建
+ *   3. 销毁：通道关闭后从哈希表移除并释放内存
+ *
+ * 关键字段说明：
+ *
+ * flags 标志位：
+ *   CH_FLAG_STATIC_LISTENER (0x01):
+ *     标记该通道为静态 listener，不会被 destroy 销毁。
+ *     热重载时通过此标志识别配置文件中定义的持久通道。
+ *   CH_FLAG_RELOAD_MARKED (0x02):
+ *     热重载过程中的临时标记。reload 流程会：
+ *       1) 给所有现有通道打上此标记
+ *       2) 遍历新配置，匹配成功的通道清除标记
+ *       3) 仍有标记的通道 = 旧配置中存在但新配置中已删除 → 关闭
+ *
+ * listener_idx:
+ *   指向 config.channels[] 中对应静态配置的索引。
+ *   动态子通道通过此字段找到其父 listener 的端口/地址配置。
+ *   对于非 listener 的动态通道，此字段指向其 parent listener。
+ *
+ * listen_fd vs local_fd:
+ *   listen_fd:  仅 LISTENER 角色使用，是 bind+listen 后的监听套接字。
+ *               负责 accept 新客户端连接。
+ *   local_fd:   INITIATOR/RESPONDER 角色使用，是 accept 返回的已连接
+ *               套接字，或主动 connect 到本地服务的套接字。
+ *               数据流向：local_fd ←(read/write)→ KCP → AF_PACKET → 对端
+ *
+ * raw_sock:
+ *   每通道独立的 AF_PACKET 原始套接字，绑定到指定网卡接口。
+ *   使用独立的 raw_sock 而非共享全局 raw_sock，是为了：
+ *   - 每个通道可绑定不同的 BPF 过滤器（按 channel_id 过滤）
+ *   - 避免全局锁竞争，提升多通道并发性能
+ */
 /* 通道结构体（前向声明 KCP 类型） */
 struct IKCPCB;  /* KCP 控制块 */
 
@@ -244,8 +417,8 @@ typedef struct channel_s {
     uint32_t        channel_id;         /* 通道 ID */
     channel_state_t state;              /* 当前状态 */
     channel_role_t  role;               /* 通道角色 */
-    uint32_t        flags;              /* 标志位（CH_FLAG_*） */
-    uint8_t         listener_idx;       /* 在 config.channels[] 中的索引 */
+    uint32_t        flags;              /* 标志位（CH_FLAG_STATIC_LISTENER / CH_FLAG_RELOAD_MARKED） */
+    uint8_t         listener_idx;       /* 在 config.channels[] 中的索引（指向父 listener 配置） */
 
     /* KCP 实例 */
     struct IKCPCB  *kcp;                /* KCP 控制块指针 */
@@ -257,7 +430,10 @@ typedef struct channel_s {
     uint8_t         local_mac[ETH_MAC_ADDR_LEN];  /* 本地 MAC */
     uint16_t        ethertype;          /* EtherType */
 
-    /* 本地套接字 */
+    /* 本地套接字
+     * listen_fd: 监听套接字（仅 LISTENER 角色），用于 accept 新连接
+     * local_fd:  已连接套接字（INITIATOR/RESPONDER），用于与本地应用通信
+     */
     int             local_fd;           /* 连接到本地应用/服务的套接字 */
     int             listen_fd;          /* 监听套接字（frontend代理模式） */
     uint16_t        listen_port;        /* 监听端口 */
@@ -290,6 +466,30 @@ typedef struct channel_s {
     struct channel_s *hash_next;
 } channel_t;
 
+/* ── 全局上下文 ──────────────────────────────────────────────────
+ * global_ctx_t 是单例全局状态，持有所有运行时资源。
+ *
+ * 动态通道 ID 分配机制：
+ *   next_dynamic_channel_id: 全局自增计数器，为每个动态创建的通道
+ *     分配唯一 ID。每次分配后原子递增。与 listener_base[]/listener_next[]
+ *     配合，支持每个 listener 独立的 ID 池。
+ *
+ *   listener_base[MAX_CHANNELS]:
+ *     每个 listener（按 config.channels[] 索引）的 ID 池起始偏移。
+ *     listener_base[i] = i * (MAX_CHANNELS 范围内每 listener 的配额)。
+ *     这样不同 listener 的动态子通道 ID 不会冲突。
+ *
+ *   listener_next[MAX_CHANNELS]:
+ *     每个 listener 的下一个可用动态 ID（相对于 listener_base 的偏移）。
+ *     分配新 ID 时：id = listener_base[idx] + listener_next[idx]++;
+ *     此方案避免了全局锁，每个 listener 独立计数。
+ *
+ * ctl_requested:
+ *   SIGUSR1 信号触发，用于运行时不重启加载通道控制命令。
+ *   主循环检测到此标志后，读取控制命令（如动态添加/删除通道），
+ *   执行后清除标志。与 reload_requested (SIGHUP) 不同，
+ *   ctl_requested 不重新读取配置文件，而是执行增量操作。
+ */
 /* 全局上下文 */
 typedef struct {
     /* AF_PACKET */
@@ -314,11 +514,11 @@ typedef struct {
     /* 运行状态 */
     volatile int    running;            /* 运行标志 */
     volatile int    reload_requested;   /* 配置重载请求（SIGHUP） */
-    volatile int    ctl_requested;      /* 通道控制请求（SIGUSR1） */
+    volatile int    ctl_requested;      /* 通道控制请求（SIGUSR1）：增量通道操作，非重载 */
     char            config_path[MAX_CONFIG_PATH]; /* 配置文件路径（用于热重载） */
-    uint32_t        next_dynamic_channel_id; /* 下一个动态分配的 channel_id */
+    uint32_t        next_dynamic_channel_id; /* 下一个动态分配的 channel_id（全局自增） */
     uint32_t        listener_base[MAX_CHANNELS];  /* 每个 listener 的 ID 池起始偏移 */
-    uint32_t        listener_next[MAX_CHANNELS];  /* 每个 listener 的下一个动态 ID */
+    uint32_t        listener_next[MAX_CHANNELS];  /* 每个 listener 的下一个动态 ID（相对偏移） */
     uint32_t        last_global_heartbeat;  /* 上一次全局心跳响应时间 */
 
     /* 统计 */
@@ -347,6 +547,20 @@ typedef struct {
 #define time_now()          ((uint32_t)time(NULL))
 #define time_elapsed(t)     (time_now() - (t))
 
+/* ── 日志宏 ──────────────────────────────────────────────────────
+ * 四级日志系统，全部输出到 stderr（适合 systemd journal 采集）。
+ *
+ * LOG_DEBUG: 调试信息，仅在 -DDEBUG 编译时生效。
+ *            用于开发阶段追踪详细的数据流向和状态变化。
+ * LOG_INFO:  正常运行信息（连接建立、关闭、配置加载等）。
+ * LOG_WARN:  警告信息（重传超限、接近资源上限、非致命错误）。
+ * LOG_ERROR: 错误信息（连接失败、系统调用错误、致命异常）。
+ *
+ * 设计理由：
+ * - 使用 fprintf(stderr) 而非 syslog，简化依赖，方便容器化部署
+ * - 日志级别通过编译宏控制，运行时零开销
+ * - 格式统一为 "[LEVEL] message"，便于 grep 和日志平台解析
+ */
 /* 日志宏 */
 #ifdef DEBUG
 #define LOG_DEBUG(fmt, ...)   fprintf(stderr, "[DEBUG] " fmt "\n", ##__VA_ARGS__)

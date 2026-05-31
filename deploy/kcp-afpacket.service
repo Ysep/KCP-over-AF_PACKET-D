@@ -1,0 +1,19 @@
+[Unit]
+Description=KCP over AF_PACKET Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kcp
+Group=kcp
+ExecStart=/usr/local/bin/kcp-afpacket /etc/kcp/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -102,7 +102,23 @@ static global_ctx_t *g_ctx = NULL;
 /* ---- 前向声明 ---- */
 static void cleanup(global_ctx_t *ctx);
 
-/* ---- 信号处理器 ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * signal_handler — 统一信号处理器
+ *
+ * 处理四种信号，全部通过设置全局标志位实现异步通知，信号处理器本身 O(1)：
+ *
+ *   SIGINT  / SIGTERM  → g_ctx->running = 0
+ *     优雅退出：主循环检测到 running=0 后跳出，执行 cleanup() 清理资源。
+ *
+ *   SIGHUP             → g_ctx->reload_requested = 1
+ *     配置热重载：主循环或 epoll_wait(EINTR) 路径检测到后调用 config_reload()。
+ *
+ *   SIGUSR1            → g_ctx->ctl_requested = 1
+ *     通道快速增删：检测到后调用 handle_channel_ctl() 解析 control JSON 文件。
+ *
+ *   SIGPIPE            → SIG_IGN（在 setup_signals 中设置）
+ *     忽略，防止向已关闭的 socket 写入导致进程异常退出。
+ * ────────────────────────────────────────────────────────────────────────── */
 static void signal_handler(int signum)
 {
     if (g_ctx == NULL) return;
@@ -203,7 +219,29 @@ static int mac_is_broadcast(const uint8_t mac[ETH_MAC_ADDR_LEN])
     return 1;
 }
 
-/* ---- 配置加载 ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * config_load — 解析 JSON 配置文件
+ *
+ * 从 JSON 文件中逐字段解析全局配置，包括：
+ *   - interface: 网卡名称（如 eth0）
+ *   - ethertype: 自定义 EtherType（默认 0x88B5）
+ *   - peer_mac / local_mac: MAC 地址（支持自动学习/自动获取）
+ *   - kcp: KCP 参数（mtu, sndwnd, rcvwnd, nodelay, interval, resend, nc）
+ *   - node_type: "frontend" 或 "backend"
+ *   - max_channels: 最大通道数（默认 65536）
+ *   - heartbeat_interval / heartbeat_timeout: 心跳间隔/超时
+ *   - encryption: SM4 加密配置（enabled, sm4_key）
+ *   - crc_enabled: 是否启用 CRC 校验
+ *   - auto_set_nic_mtu / nic_mtu: MTU 自动设置
+ *   - pid_file / instance_name: 进程管理
+ *   - channels[]: 通道列表，每个通道包含：
+ *     channel_id, listen_port, remote_port, listen_addr, remote_addr,
+ *     is_tcp, max_sessions (上限256)
+ *
+ * @param path    JSON 配置文件路径
+ * @param config  输出：填充后的全局配置结构体
+ * @return        0=成功, -1=解析或分配失败
+ * ────────────────────────────────────────────────────────────────────────── */
 int config_load(const char *path, global_config_t *config)
 {
     struct json_object *root = NULL;
@@ -631,7 +669,22 @@ static int write_pid_file(const char *path)
 
 #define DYNAMIC_CHANNEL_BASE 65536U
 
-/* ---- 构建 listener ID 池基址 ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * build_listener_bases — 构建 listener ID 池基址
+ *
+ * 为每个 listener 分配一段连续的 channel_id 范围，用于多会话模式下的
+ * 动态子通道 ID 分配。
+ *
+ * 算法：从 DYNAMIC_CHANNEL_BASE (65536) 开始，每个 listener 获得
+ *       max_sessions 个 ID 的空间。listener_base[i] 记录起始偏移，
+ *       listener_next[i] 记录下一个可分配的 ID（由 alloc_channel_id 消费）。
+ *
+ * 例如：channel[0].max_sessions=5 → 使用 ID 65536-65540
+ *       channel[1].max_sessions=3 → 使用 ID 65541-65543
+ *       ...
+ *
+ * limit=0 时自动提升为 1，确保每个 listener 至少有一个动态 ID 可用。
+ * ────────────────────────────────────────────────────────────────────────── */
 static void build_listener_bases(global_ctx_t *ctx)
 {
     uint32_t offset = DYNAMIC_CHANNEL_BASE;
@@ -644,7 +697,23 @@ static void build_listener_bases(global_ctx_t *ctx)
     }
 }
 
-/* ---- 清理 ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * cleanup — 优雅关闭，严格的逆序清理
+ *
+ * 关闭顺序（与初始化顺序相反）：
+ *   1. channel_close_all()        — 遍历所有通道，发送 FIN 控制帧
+ *   2. KCP 缓冲区排空              — 循环 channel_kcp_update() + usleep(10ms)
+ *                                    最多 20 次（200ms），确保在途数据尽力发送
+ *   3. channel_shutdown()         — 销毁所有通道 + 释放哈希表
+ *   4. proxy_shutdown()           — 关闭 epoll_fd
+ *   5. crypto_cleanup()           — 释放 SM4/SM3 上下文
+ *   6. af_packet_close()          — 关闭 AF_PACKET 原始套接字
+ *   7. close(epoll_fd)            — 关闭 epoll 实例
+ *   8. unlink(pid_file)           — 删除 PID 文件
+ *
+ * 设计考量：先排空 KCP 缓冲区再销毁通道，确保关闭前的数据尽可能送达对端。
+ * 每步操作都会检查 fd >= 0 以避免 double-close。
+ * ────────────────────────────────────────────────────────────────────────── */
 static void cleanup(global_ctx_t *ctx)
 {
     if (ctx == NULL) return;
@@ -679,7 +748,33 @@ static void cleanup(global_ctx_t *ctx)
     }
 }
 
-/* ---- 通道热重载：diff 新旧 channels[]，增/改/删 ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * config_reload_channels — 4 步算法：Mark → Diff → Clean → Update
+ *
+ * Step 1 — Mark（标记）：
+ *   遍历哈希表中所有通道，对 CH_FLAG_STATIC_LISTENER 设置 CH_FLAG_RELOAD_MARKED。
+ *
+ * Step 2 — Diff（差异对比）：
+ *   遍历新配置 channels[]，对比旧通道：
+ *     情况 A: channel_id 已存在 + 旧通道是 STATIC_LISTENER
+ *       - 清除 RELOAD_MARKED 标志
+ *       - enabled=false → 移除 STATIC_LISTENER → channel_destroy()
+ *       - 配置有变更 → proxy_port_probe() 预检 → proxy_stop_listen() →
+ *         channel_update_config() → proxy_start_listen()
+ *       - 无变更 → 仅更新 listener_idx
+ *     情况 B: channel_id 不存在 + enabled=true
+ *       - proxy_port_conflict() 端口冲突检测
+ *       - channel_create() → 复制网络层信息 → proxy_start_listen()
+ *
+ * Step 3 — Clean（清理）：
+ *   再次扫描哈希表，清理仍带 RELOAD_MARKED 的旧 listener
+ *   （说明新配置中已不存在，执行 channel_destroy）。
+ *
+ * Step 4 — Update（更新 channels[] 数组）：
+ *   将新配置通道复制到 updated_channels[]；
+ *   保留旧配置中已不存在但数组空间仍有的 disabled 条目（保持索引稳定）。
+ *   最后 memcpy 到 ctx->config.channels。
+ * ────────────────────────────────────────────────────────────────────────── */
 static void config_reload_channels(global_ctx_t *ctx,
                                    const global_config_t *new_cfg)
 {
@@ -835,7 +930,30 @@ static void config_reload_channels(global_ctx_t *ctx,
            (size_t)updated_count * sizeof(channel_config_t));
 }
 
-/* ---- 配置热重载 ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * config_reload — SIGHUP 触发的配置热重载
+ *
+ * 两阶段重载策略：
+ *
+ *   阶段一：软参数更新（no-restart）
+ *     直接应用到运行中的配置，无需重启任何通道：
+ *     - crc_enabled, heartbeat_interval, heartbeat_timeout
+ *     - KCP 参数（nodelay, interval, resend, nc, send/recv window）
+ *       更新到 config 并通过 ikcp_wndsize() + ikcp_nodelay() 应用到所有通道的 kcp 实例
+ *
+ *   阶段二：通道 diff 更新（通过 config_reload_channels）
+ *     对比新旧 channels[] 数组，执行增/改/删操作。
+ *     修改现有通道时先 proxy_port_probe() 预检新端口可用性，
+ *     再 proxy_stop_listen() → channel_update_config() → proxy_start_listen()。
+ *     best-effort 策略：单个通道失败不回滚，继续处理后续通道。
+ *
+ *   加密配置变更检测：若 encryption.enabled 或 sm4_key 变化，
+ *   先 crypto_cleanup() 再 crypto_init() 重新初始化加密模块。
+ *
+ * @param ctx         全局上下文
+ * @param config_path 配置文件路径
+ * @return            0=成功, -1=加载或验证失败
+ * ────────────────────────────────────────────────────────────────────────── */
 static int config_reload(global_ctx_t *ctx, const char *config_path)
 {
     global_config_t *new_cfg = calloc(1, sizeof(global_config_t));
@@ -898,7 +1016,24 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     return 0;
 }
 
-/* ---- 定点通道控制（SIGUSR1 触发） ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * handle_channel_ctl — SIGUSR1 触发的通道快速增删
+ *
+ * 控制文件命名规则：config.json → config-ctl.json
+ *
+ * JSON 控制文件格式（单个或数组）：
+ *   { "op": "add", "channel_id": 100, "listen_port": 8080, ... }
+ *   { "op": "del", "channel_id": 100 }
+ *
+ * 处理流程：
+ *   1. json_object_from_file() 读取控制文件
+ *   2. 遍历每个命令，调用 channel_ctl_add() 或 channel_ctl_del()
+ *   3. 统计 added/deleted/errors 数量
+ *   4. 清空控制文件（fopen("w") + fclose，实现幂等处理）
+ *
+ * 幂等性保证：控制文件被处理后立即清空，即使重复触发 SIGUSR1
+ * 也不会重复执行相同的命令。
+ * ────────────────────────────────────────────────────────────────────────── */
 
 /*
  * 解析 JSON 中的单个通道配置。
@@ -931,6 +1066,21 @@ static int ctl_parse_channel(json_object *ch_obj, channel_config_t *cfg)
     return 0;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * channel_ctl_add — O(1) 添加新 listener 通道
+ *
+ * 快速添加流程（不经过 config_reload 的完整 diff 算法）：
+ *   1. channel_find() 检查 ID 是否已存在（O(1) 哈希查找）
+ *   2. proxy_port_conflict() 端口冲突检测（仅 frontend）
+ *   3. channel_create() 创建通道
+ *   4. 复制网络层信息（raw_sock, ifindex, MAC, ethertype）
+ *   5. 设置 CH_FLAG_STATIC_LISTENER + listener_idx
+ *   6. proxy_start_listen() 启动监听（仅 frontend）
+ *   7. 追加到 ctx->config.channels[] 数组末尾
+ *   8. build_listener_bases() 重建 ID 池基址
+ *
+ * 不触发通道 diff，不重载配置文件，仅操作单个通道。
+ * ────────────────────────────────────────────────────────────────────────── */
 static int channel_ctl_add(global_ctx_t *ctx, const channel_config_t *cfg)
 {
     if (channel_find(ctx, cfg->channel_id)) {
@@ -968,6 +1118,20 @@ static int channel_ctl_add(global_ctx_t *ctx, const channel_config_t *cfg)
     return 0;
 }
 
+/* ──────────────────────────────────────────────────────────────────────────
+ * channel_ctl_del — O(1) 删除 listener 通道
+ *
+ * 快速删除流程：
+ *   1. channel_find() 查找通道（O(1) 哈希查找）
+ *   2. 检查是否为 STATIC_LISTENER（非 listener 不可通过 ctl 删除）
+ *   3. proxy_stop_listen() 关闭监听套接字（保留动态子通道）
+ *   4. 清除 CH_FLAG_STATIC_LISTENER
+ *   5. channel_destroy() 销毁通道（释放 KCP、哈希表条目）
+ *   6. 在 channels[] 数组中标记 enabled=0
+ *
+ * 注意：本函数只关闭 listener 自身，不影响其动态子通道。
+ *       子通道由 channel_timeout_check() 按超时自动回收。
+ * ────────────────────────────────────────────────────────────────────────── */
 static int channel_ctl_del(global_ctx_t *ctx, uint32_t channel_id)
 {
     channel_t *ch = channel_find(ctx, channel_id);
@@ -1040,7 +1204,30 @@ static void handle_channel_ctl(global_ctx_t *ctx)
 
 /* ---- 通道热重载 ---- */
 
-/* ---- 主入口 ---- */
+/* ──────────────────────────────────────────────────────────────────────────
+ * main — 程序入口，13 步启动序列
+ *
+ *   1. 命令行参数解析 (-v/-h/<config.json>)
+ *   2. 初始化全局上下文 (memset, raw_sock=-1, epoll_fd=-1, running=1)
+ *   3. config_load() — 解析 JSON 配置文件
+ *   4. validate_config() — 配置合法性校验
+ *   4b. crypto_init() — SM4/SM3 加密模块初始化（若启用）
+ *   5. setup_signals() — 安装 SIGHUP/SIGUSR1/SIGINT/SIGTERM/SIGPIPE
+ *   6. proxy_init() — 创建 epoll 实例 (EPOLL_CLOEXEC)
+ *   7. channel_init() — 分配哈希表 (max_channels*2 个桶)
+ *      build_listener_bases() — 构建动态 ID 池基址
+ *   8. af_packet_create() — AF_PACKET 原始套接字 (TPACKET_V2)
+ *   9. af_packet_get_mac() — 自动获取本地 MAC（若未配置）
+ *   10. 对端 MAC 确定（未配置→广播地址 FF:FF:FF:FF:FF:FF，启动自动学习）
+ *   11. af_packet_set_mtu() — 自动设置 NIC MTU（可选）
+ *   12. af_packet_set_bpf() — BPF 内核级 EtherType 过滤
+ *   13. 遍历 channels[] → channel_create() + proxy_start_listen()
+ *
+ *   14. proxy_epoll_add(raw_sock) — AF_PACKET 加入 epoll
+ *   15. 初始化时间基准 (kcp_wrap_clock, time)
+ *   16. 主事件循环
+ *   17. cleanup() — 优雅关闭
+ * ────────────────────────────────────────────────────────────────────────── */
 #ifndef TEST_BUILD
 int main(int argc, char *argv[])
 {
@@ -1294,9 +1481,35 @@ int main(int argc, char *argv[])
     /* 写入 PID 文件 */
     write_pid_file(g_ctx->config.pid_file);
 
-    /* ================================================================
-     * 16. 主事件循环
-     * ================================================================ */
+    /* ──────────────────────────────────────────────────────────────────────
+     * 16. 主事件循环 — epoll_wait → proxy_handle_event → flush → periodic
+     *
+     * 循环体内五阶段流水线：
+     *
+     *   a) epoll_wait(10ms timeout)
+     *      EINTR → 检查 reload_requested/ctl_requested 标志
+     *      其他错误 → break 退出
+     *
+     *   b) 事件分发
+     *      raw_sock 就绪 → af_packet_recv() 循环读取帧
+     *        → MAC auto-learning（首次收到非广播帧时学习对端 MAC）
+     *        → channel_process_frame() 路由帧到对应通道
+     *      代理 fd 就绪 → proxy_handle_event() 分发到 accept/read/write
+     *
+     *   c) 周期性任务（每 10ms，匹配 KCP_INTERVAL=10）
+     *      channel_kcp_update()     — 驱动所有通道的 KCP ikcp_update()
+     *      channel_heartbeat()      — 发送心跳帧
+     *      channel_timeout_check()  — 超时检测，回收死连接
+     *
+     *   d) 统计输出（每 60 秒）
+     *      channel_count() + LOG_INFO
+     *
+     *   e) 配置重载检查（reload_requested 标志）
+     *      config_reload() — 软参数更新 + 通道 diff
+     *
+     * 性能保护：MAX_FRAMES_PER_CYCLE=64，防止单次循环处理过多帧
+     *           导致饿死代理 I/O 事件。
+     * ────────────────────────────────────────────────────────────────────── */
     {
         struct epoll_event events[EPOLL_MAX_EVENTS];
 

@@ -96,6 +96,12 @@ static inline unsigned int channel_hash(uint32_t channel_id)
 
 /*
  * 在全局配置中查找与 channel_id 匹配的通道配置。
+ *
+ * 注意：此函数仅遍历静态配置表（channels[] 数组），按 channel_id 严格匹配。
+ * 对于动态分配的通道 ID（≥ DYNAMIC_CHANNEL_BASE），本函数返回 NULL，
+ * 调用者需要自行通过反向扫描 listener_base 区间来找到所属的 listener 配置。
+ * 详见 channel_process_frame 中 SYN 帧处理逻辑的 Dynamic ID fallback 部分。
+ *
  * 返回匹配的 channel_config_t 指针，未找到返回 NULL。
  */
 static const channel_config_t *channel_lookup_config(uint32_t channel_id)
@@ -301,7 +307,22 @@ static int channel_send_heartbeat_ctrl(global_ctx_t *ctx, uint8_t flags)
  * ============================================================================ */
 
 /*
- * 初始化通道子系统
+ * 初始化通道子系统（哈希表生命周期：创建阶段）
+ *
+ * 在程序启动时调用一次，完成以下工作：
+ * 1. 保存全局上下文指针 (g_ctx)，供 kcp_output_cb 等回调使用
+ * 2. 分配哈希表：大小为 max_channels * 2，限幅 [64, 65535]
+ *    使用 calloc 确保所有桶初始为 NULL
+ * 3. 重置通道计数为 0
+ *
+ * 哈希表采用链地址法（separate chaining）解决冲突：
+ *   - 每个桶是 channel_t* 指针（单链表头）
+ *   - 冲突的通道通过 hash_next 指针串联
+ *   - 插入使用头插法（O(1)），查找需遍历链表
+ *
+ * @param ctx          全局上下文指针
+ * @param max_channels 最大通道数（用于计算哈希表大小）
+ * @return             成功返回 0，失败返回 -1
  */
 int channel_init(global_ctx_t *ctx, int max_channels)
 {
@@ -337,7 +358,19 @@ int channel_init(global_ctx_t *ctx, int max_channels)
 }
 
 /*
- * 关闭通道子系统
+ * 关闭通道子系统（哈希表生命周期：销毁阶段）
+ *
+ * 在程序退出前调用一次，完成以下工作：
+ * 1. 遍历哈希表所有桶，逐个销毁桶内链表中的所有通道
+ *    - 每次取桶的第一个元素 (channel_hash[i]) 销毁
+ *    - channel_destroy 内部调用 channel_hash_remove 从链表中摘除
+ *    - 循环直到桶为空
+ * 2. 释放哈希表内存 (free)
+ * 3. 重置哈希表指针和大小，防止悬空引用
+ * 4. 清除全局上下文指针 (g_ctx = NULL)
+ *
+ * 注意：销毁顺序很重要——必须先销毁所有通道（因为它们引用
+ * g_ctx 中的资源），再释放哈希表本身，最后置空 g_ctx。
  */
 void channel_shutdown(global_ctx_t *ctx)
 {
@@ -378,6 +411,29 @@ void channel_shutdown(global_ctx_t *ctx)
 
 /*
  * 分配动态数据通道 ID。
+ *
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║                          动态通道 ID 分配策略                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║                                                                          ║
+ * ║  静态通道 ID 范围：0 ~ 65535（用户预配置的 channel_id）                   ║
+ * ║  动态通道 ID 范围：DYNAMIC_CHANNEL_BASE(65536) 起                       ║
+ * ║                                                                          ║
+ * ║  每个 listener 拥有独立的 ID 区间：                                      ║
+ * ║    listener_base[idx] = DYNAMIC_CHANNEL_BASE + idx * max_sessions        ║
+ * ║    listener_next[idx] = 区间内下一个待尝试的 ID                          ║
+ * ║                                                                          ║
+ * ║  分配算法（Round-Robin 循环探测）：                                      ║
+ * ║    1. 取 listener_next[idx] 当前值作为候选 ID                             ║
+ * ║    2. listener_next[idx] 自增（指向下一个候选）                           ║
+ * ║    3. 如果超出区间上限 [base, base+limit-1]，回绕到 base                 ║
+ * ║    4. 在哈希表中查找该 ID 是否已被占用                                   ║
+ * ║    5. 未被占用 → 返回该 ID；已占用 → 继续下一轮                          ║
+ * ║    6. 遍历 limit 次仍未找到空闲 ID → 返回 0（资源耗尽）                   ║
+ * ║                                                                          ║
+ * ║  这种设计避免了线性扫描，同时保证 ID 在区间内均匀分布。                   ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ *
  * listener_idx: listener 在 g_ctx->config.channels[] 中的 array index。
  * 每个 listener 从 listener_base[idx] 开始，范围由 max_sessions 决定。
  */
@@ -541,6 +597,30 @@ channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
               ch->remote_addr, ch->remote_port);
 
     /*
+     * 根据角色分叉初始化路径：
+     *
+     * ╔══════════════════════════════════════════════════════════════════╗
+     * ║                     三种角色初始化路径                           ║
+     * ╠══════════════════════════════════════════════════════════════════╣
+     * ║                                                                  ║
+     * ║  INITIATOR（发起方）：                                           ║
+     * ║    → 状态设为 SYN_SENT                                          ║
+     * ║    → 立即发送 SYN 帧尝试建立连接                                ║
+     * ║    → 若发送失败不阻止创建，由 timeout_check 负责重试             ║
+     * ║    → proxy_start_listen 由 main.c 统一调用                      ║
+     * ║                                                                  ║
+     * ║  RESPONDER（响应方）：                                           ║
+     * ║    → 状态设为 SYN_RCVD                                          ║
+     * ║    → 等待首个数据帧（而非 ACK）来确认连接建立                   ║
+     * ║    → 由 channel_process_frame 处理后续的 ACK 发送                ║
+     * ║                                                                  ║
+     * ║  LISTENER（监听方）：                                            ║
+     * ║    → 不发送 SYN，不设置 local_fd                                ║
+     * ║    → 状态设为 ESTABLISHED（伪就绪，兼容现有流程）                ║
+     * ║    → listen_fd 由 main.c 调用 proxy_start_listen 设置           ║
+     * ║                                                                  ║
+     * ╚══════════════════════════════════════════════════════════════════╝
+     *
      * 发起方角色：立即发送 SYN 建立连接。
      * proxy_start_listen 由 main.c 统一调用，不在此处重复。
      */
@@ -578,7 +658,17 @@ channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
 }
 
 /*
- * 销毁通道
+ * 销毁通道（清理顺序：哈希表→KCP→本地FD→监听FD→内存）
+ *
+ * 清理步骤严格按依赖关系排序：
+ *   1. channel_hash_remove  —— 从哈希表摘除，使其对外不可见
+ *   2. channel_count--       —— 更新全局计数
+ *   3. kcp_wrap_destroy      —— 销毁 KCP 实例，释放协议栈资源
+ *   4. proxy_close_local     —— 关闭与本地服务的 TCP/UDP 连接
+ *   5. close(listen_fd)      —— 关闭监听套接字（STATIC_LISTENER 除外）
+ *   6. free(ch)              —— 释放通道结构体内存
+ *
+ * STATIC_LISTENER 保护详见第 5 步注释。
  */
 void channel_destroy(global_ctx_t *ctx, channel_t *ch)
 {
@@ -620,7 +710,13 @@ void channel_destroy(global_ctx_t *ctx, channel_t *ch)
         ch->local_fd = -1;
     }
 
-    /* 关闭监听套接字（TCP/UDP 使用 close()，非 af_packet_close()） */
+    /* 关闭监听套接字（TCP/UDP 使用 close()，非 af_packet_close()）。
+     *
+     * ── STATIC_LISTENER 保护 ──
+     * 静态监听通道（CH_FLAG_STATIC_LISTENER）的 listen_fd 属于全局配置，
+     * 其生命周期与整个代理进程一致，不应在单个通道销毁时关闭。
+     * 只有动态创建（如 RESPONDER）的 listen_fd 才在此处清理。
+     * 清理步骤：先从 epoll 实例注销，再 close 文件描述符。 */
     if (ch->listen_fd >= 0 && !(ch->flags & CH_FLAG_STATIC_LISTENER)) {
         proxy_epoll_del(ctx, ch->listen_fd);
         close(ch->listen_fd);
@@ -709,7 +805,20 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
 
         switch (hdr->flags & MPF_CTRL_MASK) {
 
-        /* ---- SYN: 通道建立请求 ---- */
+        /* ── SYN: 通道建立请求 ──
+         *
+         * 处理逻辑分两种情况：
+         *
+         * A) 通道不存在（首次 SYN）：
+         *    1. 查找配置 → 2. 创建 RESPONDER → 3. 设置本地套接字
+         *       → 4. 发送 ACK → 5. 状态转入 SYN_RCVD
+         *
+         * B) 通道已存在（SYN 重传）：
+         *    - 拒绝在 FIN_SENT/FIN_RCVD/TIME_WAIT/CLOSED 状态的 SYN
+         *      （防止"僵尸复活"）
+         *    - ESTABLISHED 状态下忽略重复 SYN（已连接，无需处理）
+         *    - 其他状态回复 ACK，刷新对端活跃时间
+         */
         case MPF_SYN:
             LOG_DEBUG("channel_process_frame: SYN (channel=%u)",
                       hdr->channel_id);
@@ -717,6 +826,20 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
             ch = channel_find(ctx, hdr->channel_id);
             if (!ch) {
                 /*
+                 * ── RESPONDER 动态创建流程 ──
+                 *
+                 * 响应方收到 SYN 但哈希表中无此通道 → 新建 RESPONDER：
+                 *
+                 *   Step 1: channel_lookup_config 精确匹配 channel_id
+                 *   Step 2: 若失败，反向扫描 listener_base 区间回退查找配置
+                 *   Step 3: 用找到的 cfg（或默认值）调用 channel_create
+                 *   Step 4: 根据节点类型设置本地套接字：
+                 *     - FRONTEND: proxy_connect_remote → 连接远端服务
+                 *     - BACKEND:  proxy_start_listen → 监听本地客户端
+                 *   Step 5: 发送 ACK 确认连接建立
+                 *
+                 * 若任一步骤失败，发送 RST 并销毁通道。
+                 *
                  * 响应方收到 SYN：查找配置或使用默认参数创建通道。
                  */
                 const channel_config_t *cfg;
@@ -727,7 +850,23 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 uint8_t                 tcp   = 1;
 
                 cfg = channel_lookup_config(hdr->channel_id);
-                /* Dynamic ID fallback: search listener_base ranges */
+                /*
+                 * Dynamic ID fallback（动态 ID 回退查找）：
+                 *
+                 * channel_lookup_config 只按 channel_id 精确匹配静态配置表。
+                 * 当收到动态分配的 channel_id（≥ DYNAMIC_CHANNEL_BASE）时，
+                 * 精确匹配会失败。此时采用反向扫描策略：
+                 *
+                 *   从 channels[] 数组尾部向头部遍历，找到第一个满足
+                 *     hdr->channel_id >= listener_base[idx]
+                 *   的 listener 配置。
+                 *
+                 * 反向扫描的原因：listener_base 按 idx 递增单调排列，
+                 * 从后往前扫描能更快命中高 idx 区间（动态 ID 通常较大）。
+                 *
+                 * 找到的 cfg 提供 listen_port/remote_port/listen_addr/
+                 * remote_addr/is_tcp 等参数，用于创建 RESPONDER 通道。
+                 */
                 if (!cfg) {
                     for (int idx = g_ctx->config.channel_count - 1; idx >= 0; idx--) {
                         if (hdr->channel_id >= g_ctx->listener_base[idx]) {
@@ -812,7 +951,11 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                       hdr->channel_id);
             break;
 
-        /* ---- ACK: 通道建立确认 ---- */
+        /* ── ACK: 通道建立确认 ──
+         *
+         * 发起方收到 ACK 后从 SYN_SENT → ESTABLISHED。
+         * 若为 BACKEND 节点且本地套接字未建立，则连接远端服务。
+         * 非 SYN_SENT 状态下收到 ACK 直接忽略（可能是重复帧）。 */
         case MPF_ACK:
             LOG_DEBUG("channel_process_frame: ACK (channel=%u)",
                       hdr->channel_id);
@@ -853,7 +996,13 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
             ch->last_active    = now;
             break;
 
-        /* ---- FIN: 通道关闭请求 ---- */
+        /* ── FIN: 通道关闭请求（四次挥手简化版）──
+         *
+         * 状态转换规则：
+         *   ESTABLISHED/SYN_SENT/SYN_RCVD → FIN_RCVD（回送 FIN）
+         *   FIN_SENT → TIME_WAIT（双方同时关闭，跳过 FIN_RCVD）
+         *   FIN_RCVD/TIME_WAIT → 忽略（已在关闭路径中）
+         *   CLOSED/其他 → 记录日志并忽略 */
         case MPF_FIN:
             ch = channel_find(ctx, hdr->channel_id);
             if (!ch) {
@@ -885,7 +1034,11 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
             ch->last_peer_seen = now;
             break;
 
-        /* ---- RST: 强制复位 ---- */
+        /* ── RST: 强制复位 ──
+         *
+         * 收到 RST 后无条件将通道状态置为 CLOSED 并立即销毁。
+         * RST 是"硬关闭"信号，不经过 FIN 握手流程，
+         * 通常由超时检测或异常错误触发。 */
         case MPF_RST:
             LOG_DEBUG("channel_process_frame: RST (channel=%u)",
                       hdr->channel_id);
@@ -959,9 +1112,19 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
         return 0;
     }
 
-    /* ========================================================================
-     * 数据帧处理
-     * ======================================================================== */
+    /* ════════════════════════════════════════════════════════════════════════
+     * 数据帧处理（核心数据路径）
+     *
+     * 处理流程：
+     *   1. 哈希表查找通道
+     *   2. 若为加密帧 → 栈缓冲区解密（与 recv_buf 分离，避免冲突）
+     *   3. kcp_wrap_input → 将数据送入 KCP 进行重组/排序
+     *   4. kcp_wrap_recv 循环 → 从 KCP 读取完整消息
+     *   5. proxy_write_to_local → 写入本地套接字交付给应用
+     *
+     * SYN_RCVD 状态下收到首个数据帧 → 自动转为 ESTABLISHED
+     * 本地写入失败 → 关闭本地连接 + 发送 FIN 通知对端
+     * ════════════════════════════════════════════════════════════════════════ */
     if (IS_DATA_FRAME(hdr->flags)) {
 
         LOG_DEBUG("channel_process_frame: DATA (channel=%u, len=%zu, "
@@ -1345,7 +1508,16 @@ void channel_timeout_check(global_ctx_t *ctx)
         while (ch) {
             channel_t *next = ch->hash_next;
 
-            /* Skip static listener channels — they are not subject to data channel timeouts */
+            /*
+             * 跳过静态监听通道（STATIC_LISTENER）：
+             *
+             * 静态监听通道由配置文件定义，其生命周期与进程一致。
+             * 它们不发送/接收数据，仅作为 accept() 的入口点，
+             * 因此不受数据通道超时机制约束。
+             *
+             * 如果对 STATIC_LISTENER 应用心跳超时检查，会导致
+             * 监听通道被误关闭，所有后续连接请求都将失败。
+             */
             if (ch->flags & CH_FLAG_STATIC_LISTENER) {
                 ch = next;
                 continue;
@@ -1546,7 +1718,19 @@ int channel_count(global_ctx_t *ctx)
 }
 
 /*
- * 比较通道配置是否变更。
+ * 比较通道配置是否变更（热重载检测）。
+ *
+ * 当配置文件被修改后，系统支持在不重启的情况下重新加载配置。
+ * 此函数对比通道当前运行时参数与新配置，逐一检查五个关键字段：
+ *   - listen_port：本地监听端口
+ *   - remote_port：远端服务端口
+ *   - listen_addr：本地监听地址
+ *   - remote_addr：远端服务地址
+ *   - is_tcp：传输协议类型（TCP=1, UDP=0）
+ *
+ * 任一字段不一致即视为配置变更，触发 channel_update_config 刷新。
+ * 此机制实现了通道级别的增量配置热更新，避免全量重建。
+ *
  * @return 1=有变更, 0=无变更
  */
 int channel_config_changed(const channel_t *ch,
@@ -1561,7 +1745,14 @@ int channel_config_changed(const channel_t *ch,
 }
 
 /*
- * 将新配置写入通道对象（不触碰运行时状态和 KCP 实例）。
+ * 将新配置写入通道对象（热重载执行函数）。
+ *
+ * 仅更新通道的应用层参数（端口、地址、协议类型），
+ * 不触碰运行时状态（state、last_active 等）和 KCP 实例。
+ * 这保证了配置热重载对正在传输的数据流无感知、无中断。
+ *
+ * 典型调用链：
+ *   channel_config_changed() → 返回 1 → channel_update_config() → 完成热刷新
  */
 void channel_update_config(channel_t *ch,
                            const channel_config_t *cfg)
