@@ -313,7 +313,8 @@ typedef struct {
 
     /* 运行状态 */
     volatile int    running;            /* 运行标志 */
-    volatile int    reload_requested;   /* 配置重载请求 */
+    volatile int    reload_requested;   /* 配置重载请求（SIGHUP） */
+    volatile int    ctl_requested;      /* 通道控制请求（SIGUSR1） */
     char            config_path[MAX_CONFIG_PATH]; /* 配置文件路径（用于热重载） */
     uint32_t        next_dynamic_channel_id; /* 下一个动态分配的 channel_id */
     uint32_t        listener_base[MAX_CHANNELS];  /* 每个 listener 的 ID 池起始偏移 */

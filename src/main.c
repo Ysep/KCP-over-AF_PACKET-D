@@ -115,6 +115,9 @@ static void signal_handler(int signum)
     case SIGHUP:
         g_ctx->reload_requested = 1;
         break;
+    case SIGUSR1:
+        g_ctx->ctl_requested = 1;
+        break;
     default:
         break;
     }
@@ -142,6 +145,10 @@ static int setup_signals(global_ctx_t *ctx)
     }
     if (sigaction(SIGHUP, &sa, NULL) < 0) {
         LOG_ERROR("Failed to set SIGHUP handler: %s", strerror(errno));
+        return -1;
+    }
+    if (sigaction(SIGUSR1, &sa, NULL) < 0) {
+        LOG_ERROR("Failed to set SIGUSR1 handler: %s", strerror(errno));
         return -1;
     }
 
@@ -891,6 +898,148 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     return 0;
 }
 
+/* ---- 定点通道控制（SIGUSR1 触发） ---- */
+
+/*
+ * 解析 JSON 中的单个通道配置。
+ */
+static int ctl_parse_channel(json_object *ch_obj, channel_config_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->enabled  = 1;
+    cfg->is_tcp   = 1;
+
+    json_object *tmp;
+    if (json_object_object_get_ex(ch_obj, "channel_id", &tmp))
+        cfg->channel_id = (uint32_t)json_object_get_int64(tmp);
+    else { LOG_ERROR("ctl: missing channel_id"); return -1; }
+
+    if (json_object_object_get_ex(ch_obj, "listen_port", &tmp))
+        cfg->listen_port = (uint16_t)json_object_get_int(tmp);
+    if (json_object_object_get_ex(ch_obj, "remote_port", &tmp))
+        cfg->remote_port = (uint16_t)json_object_get_int(tmp);
+    if (json_object_object_get_ex(ch_obj, "listen_addr", &tmp))
+        strncpy(cfg->listen_addr, json_object_get_string(tmp), MAX_LISTEN_ADDR - 1);
+    if (json_object_object_get_ex(ch_obj, "remote_addr", &tmp))
+        strncpy(cfg->remote_addr, json_object_get_string(tmp), MAX_REMOTE_ADDR - 1);
+    if (json_object_object_get_ex(ch_obj, "is_tcp", &tmp))
+        cfg->is_tcp = (uint8_t)json_object_get_int(tmp);
+    if (json_object_object_get_ex(ch_obj, "max_sessions", &tmp)) {
+        int ms = json_object_get_int(tmp);
+        cfg->max_sessions = (ms > 0 && ms <= 65535) ? (uint16_t)ms : 1;
+    }
+    return 0;
+}
+
+static int channel_ctl_add(global_ctx_t *ctx, const channel_config_t *cfg)
+{
+    if (channel_find(ctx, cfg->channel_id)) {
+        LOG_ERROR("ctl_add: channel %u already exists", cfg->channel_id);
+        return -1;
+    }
+    if (ctx->config.node_type == NODE_TYPE_FRONTEND &&
+        proxy_port_conflict(ctx, cfg->listen_addr, cfg->listen_port, 0)) {
+        LOG_ERROR("ctl_add: port %s:%u already in use", cfg->listen_addr, cfg->listen_port);
+        return -1;
+    }
+    channel_t *ch = channel_create(ctx, cfg->channel_id, CHANNEL_ROLE_LISTENER,
+                                    cfg->listen_port, cfg->remote_port,
+                                    cfg->listen_addr, cfg->remote_addr, cfg->is_tcp);
+    if (!ch) { LOG_ERROR("ctl_add: create failed for %u", cfg->channel_id); return -1; }
+    ch->raw_sock  = ctx->raw_sock;
+    ch->ifindex   = ctx->ifindex;
+    memcpy(ch->local_mac, ctx->local_mac, ETH_MAC_ADDR_LEN);
+    memcpy(ch->peer_mac,  ctx->peer_mac,  ETH_MAC_ADDR_LEN);
+    ch->ethertype = ctx->ethertype;
+    ch->flags     = CH_FLAG_STATIC_LISTENER;
+    ch->listener_idx = (uint8_t)ctx->config.channel_count;
+    if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
+        if (proxy_start_listen(ctx, ch) != 0) {
+            ch->flags &= ~CH_FLAG_STATIC_LISTENER;
+            channel_destroy(ctx, ch);
+            return -1;
+        }
+    }
+    if (ctx->config.channel_count < MAX_CHANNELS) {
+        ctx->config.channels[ctx->config.channel_count++] = *cfg;
+        build_listener_bases(ctx);
+    }
+    LOG_INFO("ctl: channel %u added (listen=%s:%u)", cfg->channel_id, cfg->listen_addr, cfg->listen_port);
+    return 0;
+}
+
+static int channel_ctl_del(global_ctx_t *ctx, uint32_t channel_id)
+{
+    channel_t *ch = channel_find(ctx, channel_id);
+    if (!ch || !(ch->flags & CH_FLAG_STATIC_LISTENER)) {
+        LOG_ERROR("ctl_del: listener %u not found", channel_id);
+        return -1;
+    }
+    proxy_stop_listen(ctx, ch);
+    ch->flags &= ~CH_FLAG_STATIC_LISTENER;
+    channel_destroy(ctx, ch);
+    for (int i = 0; i < ctx->config.channel_count; i++) {
+        if (ctx->config.channels[i].channel_id == channel_id) {
+            ctx->config.channels[i].enabled = 0;
+            break;
+        }
+    }
+    LOG_INFO("ctl: channel %u removed", channel_id);
+    return 0;
+}
+
+static void handle_channel_ctl(global_ctx_t *ctx)
+{
+    /* 构造控制文件路径: config.json → config-ctl.json */
+    char ctl_path[512];
+    size_t len = strnlen(ctx->config_path, sizeof(ctx->config_path) - 1);
+    if (len > 5 && strcmp(ctx->config_path + len - 5, ".json") == 0) {
+        snprintf(ctl_path, sizeof(ctl_path), "%.*s-ctl.json", (int)(len - 5), ctx->config_path);
+    } else {
+        snprintf(ctl_path, sizeof(ctl_path), "%s-ctl.json", ctx->config_path);
+    }
+
+    json_object *root = json_object_from_file(ctl_path);
+    if (!root) return;  /* 文件不存在 → 静默跳过 */
+
+    int added = 0, deleted = 0, errors = 0;
+    int is_array = json_object_is_type(root, json_type_array);
+    int count     = is_array ? (int)json_object_array_length(root) : 1;
+
+    for (int i = 0; i < count; i++) {
+        json_object *cmd = is_array ? json_object_array_get_idx(root, (size_t)i) : root;
+        json_object *tmp;
+        if (!json_object_object_get_ex(cmd, "op", &tmp)) { errors++; continue; }
+        const char *op = json_object_get_string(tmp);
+
+        if (strcmp(op, "add") == 0) {
+            channel_config_t cfg;
+            if (ctl_parse_channel(cmd, &cfg) == 0 && channel_ctl_add(ctx, &cfg) == 0)
+                added++;
+            else errors++;
+        } else if (strcmp(op, "del") == 0) {
+            json_object *id_obj;
+            if (json_object_object_get_ex(cmd, "channel_id", &id_obj)) {
+                if (channel_ctl_del(ctx, (uint32_t)json_object_get_int64(id_obj)) == 0)
+                    deleted++;
+                else errors++;
+            } else errors++;
+        } else {
+            LOG_ERROR("ctl: unknown op '%s'", op);
+            errors++;
+        }
+    }
+    json_object_put(root);
+
+    /* 清空控制文件（幂等处理） */
+    FILE *f = fopen(ctl_path, "w");
+    if (f) fclose(f);
+
+    LOG_INFO("ctl: processed %d ops (add=%d del=%d errors=%d)", count, added, deleted, errors);
+}
+
+/* ---- 通道热重载 ---- */
+
 /* ---- 主入口 ---- */
 #ifndef TEST_BUILD
 int main(int argc, char *argv[])
@@ -944,27 +1093,28 @@ int main(int argc, char *argv[])
      * 2. 初始化全局上下文
      * ================================================================ */
     memset(g_ctx, 0, sizeof(ctx));
-    ctx.raw_sock = -1;
-    ctx.epoll_fd = -1;
-    ctx.running  = 1;
-    ctx.reload_requested = 0;
+    g_ctx->raw_sock = -1;
+    g_ctx->epoll_fd = -1;
+    g_ctx->running  = 1;
+    g_ctx->reload_requested = 0;
+    g_ctx->ctl_requested    = 0;
 
     /* ================================================================
      * 3. 加载配置
      * ================================================================ */
-    if (config_load(config_path, &ctx.config) != 0) {
+    if (config_load(config_path, &g_ctx->config) != 0) {
         LOG_ERROR("Failed to load config from %s", config_path);
         return 1;
     }
 
     /* Save config path for hot-reload */
-    strncpy(ctx.config_path, config_path, sizeof(ctx.config_path) - 1);
-    ctx.config_path[sizeof(ctx.config_path) - 1] = '\0';
+    strncpy(g_ctx->config_path, config_path, sizeof(g_ctx->config_path) - 1);
+    g_ctx->config_path[sizeof(g_ctx->config_path) - 1] = '\0';
 
     /* ================================================================
      * 4. 验证配置
      * ================================================================ */
-    if (validate_config(&ctx.config) != 0) {
+    if (validate_config(&g_ctx->config) != 0) {
         LOG_ERROR("Configuration validation failed");
         return 1;
     }
@@ -972,7 +1122,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 4b. 初始化加密模块
      * ================================================================ */
-    if (ctx.config.encryption.enabled) {
+    if (g_ctx->config.encryption.enabled) {
         if (crypto_init(&g_ctx->config.encryption) < 0) {
             LOG_ERROR("Failed to initialize crypto module");
             return 1;
@@ -999,7 +1149,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 7. 初始化通道子系统
      * ================================================================ */
-    if (channel_init(g_ctx, ctx.config.max_channels) != 0) {
+    if (channel_init(g_ctx, g_ctx->config.max_channels) != 0) {
         LOG_ERROR("Failed to initialize channel subsystem");
         cleanup(g_ctx);
         return 1;
@@ -1011,72 +1161,72 @@ int main(int argc, char *argv[])
      * 8. 创建 AF_PACKET 原始套接字
      * ================================================================ */
     {
-        uint16_t ethertype_n = htons(ctx.config.ethertype);
+        uint16_t ethertype_n = htons(g_ctx->config.ethertype);
 
-        ctx.raw_sock = af_packet_create(ctx.config.interface, ethertype_n, &ctx.ifindex);
-        if (ctx.raw_sock < 0) {
-            LOG_ERROR("Failed to create AF_PACKET socket on %s", ctx.config.interface);
+        g_ctx->raw_sock = af_packet_create(g_ctx->config.interface, ethertype_n, &g_ctx->ifindex);
+        if (g_ctx->raw_sock < 0) {
+            LOG_ERROR("Failed to create AF_PACKET socket on %s", g_ctx->config.interface);
             cleanup(g_ctx);
             return 1;
         }
-        ctx.ethertype = ethertype_n;
-        LOG_INFO("AF_PACKET socket created on %s, ifindex=%d", ctx.config.interface, ctx.ifindex);
+        g_ctx->ethertype = ethertype_n;
+        LOG_INFO("AF_PACKET socket created on %s, ifindex=%d", g_ctx->config.interface, g_ctx->ifindex);
     }
 
     /* ================================================================
      * 9. 获取本地 MAC
      * ================================================================ */
-    if (mac_is_zero(ctx.config.local_mac)) {
-        if (af_packet_get_mac(ctx.raw_sock, ctx.config.interface, ctx.local_mac) == 0) {
+    if (mac_is_zero(g_ctx->config.local_mac)) {
+        if (af_packet_get_mac(g_ctx->raw_sock, g_ctx->config.interface, g_ctx->local_mac) == 0) {
             LOG_INFO("Auto-discovered local MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-                     ctx.local_mac[0], ctx.local_mac[1], ctx.local_mac[2],
-                     ctx.local_mac[3], ctx.local_mac[4], ctx.local_mac[5]);
+                     g_ctx->local_mac[0], g_ctx->local_mac[1], g_ctx->local_mac[2],
+                     g_ctx->local_mac[3], g_ctx->local_mac[4], g_ctx->local_mac[5]);
         } else {
-            LOG_ERROR("Failed to auto-discover local MAC on %s", ctx.config.interface);
+            LOG_ERROR("Failed to auto-discover local MAC on %s", g_ctx->config.interface);
             cleanup(g_ctx);
             return 1;
         }
     } else {
-        memcpy(ctx.local_mac, ctx.config.local_mac, ETH_MAC_ADDR_LEN);
+        memcpy(g_ctx->local_mac, g_ctx->config.local_mac, ETH_MAC_ADDR_LEN);
     }
 
     /* ================================================================
      * 10. 对端 MAC
      * ================================================================ */
-    if (mac_is_zero(ctx.config.peer_mac)) {
+    if (mac_is_zero(g_ctx->config.peer_mac)) {
         LOG_INFO("Peer MAC not configured — using auto-discovery (broadcast initially)");
-        memset(ctx.peer_mac, 0xFF, ETH_MAC_ADDR_LEN);
-        ctx.peer_mac_learned = 0;
+        memset(g_ctx->peer_mac, 0xFF, ETH_MAC_ADDR_LEN);
+        g_ctx->peer_mac_learned = 0;
     } else {
-        memcpy(ctx.peer_mac, ctx.config.peer_mac, ETH_MAC_ADDR_LEN);
-        ctx.peer_mac_learned = 1;
+        memcpy(g_ctx->peer_mac, g_ctx->config.peer_mac, ETH_MAC_ADDR_LEN);
+        g_ctx->peer_mac_learned = 1;
     }
 
     /* ================================================================
      * 11. 自动设置 NIC MTU
      * ================================================================ */
-    if (ctx.config.auto_set_nic_mtu) {
-        if (af_packet_set_mtu(ctx.raw_sock, ctx.config.interface, ctx.config.nic_mtu) == 0) {
-            LOG_INFO("NIC MTU set to %d on %s", ctx.config.nic_mtu, ctx.config.interface);
+    if (g_ctx->config.auto_set_nic_mtu) {
+        if (af_packet_set_mtu(g_ctx->raw_sock, g_ctx->config.interface, g_ctx->config.nic_mtu) == 0) {
+            LOG_INFO("NIC MTU set to %d on %s", g_ctx->config.nic_mtu, g_ctx->config.interface);
         } else {
-            LOG_WARN("Failed to set NIC MTU to %d on %s", ctx.config.nic_mtu, ctx.config.interface);
+            LOG_WARN("Failed to set NIC MTU to %d on %s", g_ctx->config.nic_mtu, g_ctx->config.interface);
         }
     }
 
     /* ================================================================
      * 12. 设置 BPF 过滤器
      * ================================================================ */
-    if (af_packet_set_bpf(ctx.raw_sock, ctx.ethertype) != 0) {
-        LOG_ERROR("Failed to set BPF filter for ethertype 0x%04X", ctx.config.ethertype);
+    if (af_packet_set_bpf(g_ctx->raw_sock, g_ctx->ethertype) != 0) {
+        LOG_ERROR("Failed to set BPF filter for ethertype 0x%04X", g_ctx->config.ethertype);
         cleanup(g_ctx);
         return 1;
     }
-    LOG_INFO("BPF filter set for ethertype 0x%04X", ctx.config.ethertype);
+    LOG_INFO("BPF filter set for ethertype 0x%04X", g_ctx->config.ethertype);
 
     /* ================================================================
      * 13. 创建通道并为每个通道启动代理监听
      * ================================================================ */
-    for (int i = 0; i < ctx.config.channel_count; i++) {
+    for (int i = 0; i < g_ctx->config.channel_count; i++) {
         channel_config_t *ch_cfg = &g_ctx->config.channels[i];
 
         /* 统一使用 LISTENER 角色 — 不发 SYN，仅作为配置载体 */
@@ -1092,18 +1242,18 @@ int main(int argc, char *argv[])
         }
 
         /* 复制网络层信息（channel_create 已从 ctx 复制，此处确保一致性） */
-        ch->raw_sock = ctx.raw_sock;
-        ch->ifindex  = ctx.ifindex;
-        memcpy(ch->local_mac, ctx.local_mac, ETH_MAC_ADDR_LEN);
-        memcpy(ch->peer_mac,  ctx.peer_mac,  ETH_MAC_ADDR_LEN);
-        ch->ethertype = ctx.ethertype;
+        ch->raw_sock = g_ctx->raw_sock;
+        ch->ifindex  = g_ctx->ifindex;
+        memcpy(ch->local_mac, g_ctx->local_mac, ETH_MAC_ADDR_LEN);
+        memcpy(ch->peer_mac,  g_ctx->peer_mac,  ETH_MAC_ADDR_LEN);
+        ch->ethertype = g_ctx->ethertype;
 
         /* Listener 通道：设置防护标志，存储 array index（用于 alloc_channel_id） */
         ch->flags        = CH_FLAG_STATIC_LISTENER;
         ch->listener_idx = (uint8_t)i;
 
         /* 启动代理：frontend 节点监听本地端口 */
-        if (ctx.config.node_type == NODE_TYPE_FRONTEND) {
+        if (g_ctx->config.node_type == NODE_TYPE_FRONTEND) {
             if (proxy_start_listen(g_ctx, ch) != 0) {
                 LOG_ERROR("Failed to start listen for channel id=%u",
                           ch_cfg->channel_id);
@@ -1122,7 +1272,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 14. 将 AF_PACKET 套接字加入 epoll
      * ================================================================ */
-    ret = proxy_epoll_add(g_ctx, ctx.raw_sock, NULL);
+    ret = proxy_epoll_add(g_ctx, g_ctx->raw_sock, NULL);
     if (ret != 0) {
         LOG_ERROR("Failed to add raw socket to epoll");
         cleanup(g_ctx);
@@ -1137,12 +1287,12 @@ int main(int argc, char *argv[])
 
     LOG_INFO("KCP-over-AF_PACKET v" VERSION " started. "
              "Instance: %s, Mode: %s, interface: %s, ethertype: 0x%04X, channels: %d",
-             ctx.config.instance_name,
-             ctx.config.node_type == NODE_TYPE_FRONTEND ? "frontend" : "backend",
-             ctx.config.interface, ctx.config.ethertype, ctx.config.channel_count);
+             g_ctx->config.instance_name,
+             g_ctx->config.node_type == NODE_TYPE_FRONTEND ? "frontend" : "backend",
+             g_ctx->config.interface, g_ctx->config.ethertype, g_ctx->config.channel_count);
 
     /* 写入 PID 文件 */
-    write_pid_file(ctx.config.pid_file);
+    write_pid_file(g_ctx->config.pid_file);
 
     /* ================================================================
      * 16. 主事件循环
@@ -1150,17 +1300,21 @@ int main(int argc, char *argv[])
     {
         struct epoll_event events[EPOLL_MAX_EVENTS];
 
-        while (ctx.running) {
-            int nfds = epoll_wait(ctx.epoll_fd, events, EPOLL_MAX_EVENTS, EPOLL_TIMEOUT_MS);
+        while (g_ctx->running) {
+            int nfds = epoll_wait(g_ctx->epoll_fd, events, EPOLL_MAX_EVENTS, EPOLL_TIMEOUT_MS);
 
             if (nfds < 0) {
                 if (errno == EINTR) {
                     /* 被信号中断，检查是否退出或重载 */
-                    if (ctx.reload_requested) {
-                        if (config_reload(g_ctx, ctx.config_path) == 0) {
+                    if (g_ctx->reload_requested) {
+                        if (config_reload(g_ctx, g_ctx->config_path) == 0) {
                             LOG_INFO("Configuration reloaded (SIGHUP)");
                         }
-                        ctx.reload_requested = 0;
+                        g_ctx->reload_requested = 0;
+                    }
+                    if (g_ctx->ctl_requested) {
+                        handle_channel_ctl(g_ctx);
+                        g_ctx->ctl_requested = 0;
                     }
                     continue;
                 }
@@ -1173,7 +1327,7 @@ int main(int argc, char *argv[])
                 int fd = events[i].data.fd;
                 uint32_t ev = events[i].events;
 
-                if (fd == ctx.raw_sock) {
+                if (fd == g_ctx->raw_sock) {
                     /* AF_PACKET 可读：接收所有待处理的帧 */
                     uint8_t  buf[AF_PACKET_FRAME_SIZE];
                     uint8_t  src_mac[ETH_MAC_ADDR_LEN];
@@ -1183,7 +1337,7 @@ int main(int argc, char *argv[])
 
                     int frame_count = 0;
                     while (frame_count < MAX_FRAMES_PER_CYCLE) {
-                        ssize_t len = af_packet_recv(ctx.raw_sock, buf, sizeof(buf),
+                        ssize_t len = af_packet_recv(g_ctx->raw_sock, buf, sizeof(buf),
                                                      src_mac, dst_mac, &ethtype);
                         if (len < 0) {
                             /* EAGAIN/EWOULDBLOCK 表示无更多帧 */
@@ -1208,7 +1362,7 @@ int main(int argc, char *argv[])
                         }
 
                         /* CRC 校验（仅对数据帧；控制帧不带CRC） */
-                        if (ctx.config.crc_enabled && !IS_CTRL_FRAME(hdr.flags)) {
+                        if (g_ctx->config.crc_enabled && !IS_CTRL_FRAME(hdr.flags)) {
                             ssize_t data_len = myproto_verify_crc(buf, (size_t)len);
                             if (data_len < 0) {
                                 LOG_DEBUG("CRC verification failed for frame");
@@ -1220,16 +1374,16 @@ int main(int argc, char *argv[])
                         }
 
                         /* MAC auto-learning: if peer_mac is broadcast, learn from first valid frame */
-                        if (ctx.peer_mac_learned == 0 && !mac_is_broadcast(src_mac) && !mac_is_zero(src_mac)) {
-                            memcpy(ctx.peer_mac, src_mac, ETH_MAC_ADDR_LEN);
-                            ctx.peer_mac_learned = 1;
+                        if (g_ctx->peer_mac_learned == 0 && !mac_is_broadcast(src_mac) && !mac_is_zero(src_mac)) {
+                            memcpy(g_ctx->peer_mac, src_mac, ETH_MAC_ADDR_LEN);
+                            g_ctx->peer_mac_learned = 1;
                             LOG_INFO("Auto-learned peer MAC: %02x:%02x:%02x:%02x:%02x:%02x",
                                      src_mac[0], src_mac[1], src_mac[2], src_mac[3], src_mac[4], src_mac[5]);
                             /* Update all existing channels with learned MAC */
-                            for (uint32_t i = 0; i < ctx.channel_hash_size; i++) {
-                                channel_t *ch = ctx.channel_hash[i];
+                            for (uint32_t i = 0; i < g_ctx->channel_hash_size; i++) {
+                                channel_t *ch = g_ctx->channel_hash[i];
                                 while (ch) {
-                                    memcpy(ch->peer_mac, ctx.peer_mac, ETH_MAC_ADDR_LEN);
+                                    memcpy(ch->peer_mac, g_ctx->peer_mac, ETH_MAC_ADDR_LEN);
                                     ch = ch->hash_next;
                                 }
                             }
@@ -1261,22 +1415,22 @@ int main(int argc, char *argv[])
             }
 
             /* ---- 统计输出（每 60 秒） ---- */
-            if (ctx.config.stats_enabled) {
+            if (g_ctx->config.stats_enabled) {
                 uint32_t now_sec = time(NULL);
                 if (now_sec - last_stats_sec >= STATS_INTERVAL_SEC) {
                     int active = channel_count(&ctx);
                     LOG_INFO("Stats: %d active channels, running=%d",
-                             active, ctx.running);
+                             active, g_ctx->running);
                     last_stats_sec = now_sec;
                 }
             }
 
             /* ---- 配置重载请求 ---- */
-            if (ctx.reload_requested) {
-                if (config_reload(g_ctx, ctx.config_path) == 0) {
+            if (g_ctx->reload_requested) {
+                if (config_reload(g_ctx, g_ctx->config_path) == 0) {
                     LOG_INFO("Configuration reloaded (SIGHUP)");
                 }
-                ctx.reload_requested = 0;
+                g_ctx->reload_requested = 0;
             }
         }
     }
