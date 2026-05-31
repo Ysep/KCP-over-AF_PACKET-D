@@ -119,9 +119,14 @@ TEST_INTEG3_SRC  := tests/test_integration_v3.c src/myproto.c src/crypto.c src/c
 TEST_INTEG3_BIN  := tests/test_integration_v3
 TEST_INTEG3_LIBS := -lrt -lnettle
 
-.PHONY: test test-unit test-integ test-integ2 test-integ3 test-compare test-clean
+# 通道热重载 & uint32 channel_id 集成测试
+TEST_INTEG4_SRC  := tests/test_integration_v4.c src/myproto.c src/crypto.c src/channel.c src/kcp_wrap.c src/ikcp.c
+TEST_INTEG4_BIN  := tests/test_integration_v4
+TEST_INTEG4_LIBS := -lrt -lnettle
 
-test: test-unit test-integ test-integ2 test-integ3
+.PHONY: test test-unit test-integ test-integ2 test-integ3 test-integ4 test-compare test-clean
+
+test: test-unit test-integ test-integ2 test-integ3 test-integ4
 
 test-unit: $(TEST_MYPROTO_BIN)
 	@echo "  RUN     $(TEST_MYPROTO_BIN)"
@@ -138,6 +143,10 @@ test-integ2: $(TEST_INTEG2_BIN)
 test-integ3: $(TEST_INTEG3_BIN)
 	@echo "  RUN     $(TEST_INTEG3_BIN)"
 	@./$(TEST_INTEG3_BIN)
+
+test-integ4: $(TEST_INTEG4_BIN)
+	@echo "  RUN     $(TEST_INTEG4_BIN)"
+	@./$(TEST_INTEG4_BIN)
 
 $(TEST_MYPROTO_BIN): $(TEST_MYPROTO_SRC)
 	@mkdir -p tests
@@ -171,3 +180,8 @@ $(TEST_INTEG3_BIN): $(TEST_INTEG3_SRC)
 	@mkdir -p tests
 	@echo "  CC      $@"
 	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_INTEG3_SRC) $(TEST_INTEG3_LIBS)
+
+$(TEST_INTEG4_BIN): $(TEST_INTEG4_SRC)
+	@mkdir -p tests
+	@echo "  CC      $@"
+	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_INTEG4_SRC) $(TEST_INTEG4_LIBS)
