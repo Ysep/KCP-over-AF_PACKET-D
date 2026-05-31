@@ -869,7 +869,10 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                  */
                 if (!cfg) {
                     for (int idx = g_ctx->config.channel_count - 1; idx >= 0; idx--) {
-                        if (hdr->channel_id >= g_ctx->listener_base[idx]) {
+                        uint32_t limit = (uint32_t)g_ctx->config.channels[idx].max_sessions;
+                        if (limit == 0) limit = 1;
+                        if (hdr->channel_id >= g_ctx->listener_base[idx] &&
+                            hdr->channel_id < g_ctx->listener_base[idx] + limit) {
                             cfg = &g_ctx->config.channels[idx];
                             break;
                         }
@@ -899,7 +902,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                  * Backend proxy: responder listens for local clients. */
                 if (g_ctx && g_ctx->config.node_type == NODE_TYPE_FRONTEND) {
                     /* Frontend: connect to remote_addr:remote_port */
-                    if (proxy_connect_remote(ch) == 0) {
+                    if (proxy_connect_remote(ch) >= 0) {
                         channel_send_ctrl(ch, MPF_ACK);
                     } else {
                         LOG_ERROR("Failed to connect remote for "
@@ -1455,6 +1458,12 @@ void channel_heartbeat(global_ctx_t *ctx)
              * 保存 hash_next，防止 channel_send_ctrl 间接触发销毁。
              */
             channel_t *next = ch->hash_next;
+
+            /* 跳过静态监听通道（不承载数据，不需心跳） */
+            if (ch->flags & CH_FLAG_STATIC_LISTENER) {
+                ch = next;
+                continue;
+            }
 
             if (ch->state == CHANNEL_ESTABLISHED) {
                 if (time_elapsed(ch->last_active) >= (uint32_t)interval) {

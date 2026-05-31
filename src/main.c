@@ -496,10 +496,10 @@ int config_load(const char *path, global_config_t *config)
 
             ch_cfg->enabled = 1;
 
-            /* max_sessions: 0=默认1，上限256 */
+            /* max_sessions: 0=默认1，上限65535 */
             if (json_object_object_get_ex(ch_obj, "max_sessions", &tmp)) {
                 int ms = json_object_get_int(tmp);
-                ch_cfg->max_sessions = (ms > 0 && ms <= 256) ? (uint16_t)ms : 1;
+                ch_cfg->max_sessions = (ms > 0 && ms <= 65535) ? (uint16_t)ms : 1;
             } else {
                 ch_cfg->max_sessions = 1;
             }
@@ -689,7 +689,7 @@ static void build_listener_bases(global_ctx_t *ctx)
 {
     uint32_t offset = DYNAMIC_CHANNEL_BASE;
     for (int i = 0; i < ctx->config.channel_count; i++) {
-        uint32_t limit = (uint32_t)g_ctx->config.channels[i].max_sessions;
+        uint32_t limit = (uint32_t)ctx->config.channels[i].max_sessions;
         if (limit == 0) limit = 1;
         ctx->listener_base[i] = offset;
         ctx->listener_next[i] = offset;
@@ -961,6 +961,7 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
 
     if (config_load(config_path, new_cfg) != 0) {
         LOG_ERROR("Config reload: failed to load %s", config_path);
+        free(new_cfg);
         return -1;
     }
 
@@ -1053,10 +1054,14 @@ static int ctl_parse_channel(json_object *ch_obj, channel_config_t *cfg)
         cfg->listen_port = (uint16_t)json_object_get_int(tmp);
     if (json_object_object_get_ex(ch_obj, "remote_port", &tmp))
         cfg->remote_port = (uint16_t)json_object_get_int(tmp);
-    if (json_object_object_get_ex(ch_obj, "listen_addr", &tmp))
+    if (json_object_object_get_ex(ch_obj, "listen_addr", &tmp)) {
         strncpy(cfg->listen_addr, json_object_get_string(tmp), MAX_LISTEN_ADDR - 1);
-    if (json_object_object_get_ex(ch_obj, "remote_addr", &tmp))
+        cfg->listen_addr[MAX_LISTEN_ADDR - 1] = '\0';
+    }
+    if (json_object_object_get_ex(ch_obj, "remote_addr", &tmp)) {
         strncpy(cfg->remote_addr, json_object_get_string(tmp), MAX_REMOTE_ADDR - 1);
+        cfg->remote_addr[MAX_REMOTE_ADDR - 1] = '\0';
+    }
     if (json_object_object_get_ex(ch_obj, "is_tcp", &tmp))
         cfg->is_tcp = (uint8_t)json_object_get_int(tmp);
     if (json_object_object_get_ex(ch_obj, "max_sessions", &tmp)) {
@@ -1231,7 +1236,6 @@ static void handle_channel_ctl(global_ctx_t *ctx)
 #ifndef TEST_BUILD
 int main(int argc, char *argv[])
 {
-    global_ctx_t   ctx;
     g_ctx = calloc(1, sizeof(global_ctx_t));
     if (!g_ctx) {
         fprintf(stderr, "FATAL: unable to allocate global context\n");
@@ -1279,7 +1283,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 2. 初始化全局上下文
      * ================================================================ */
-    memset(g_ctx, 0, sizeof(ctx));
+    memset(g_ctx, 0, sizeof(global_ctx_t));
     g_ctx->raw_sock = -1;
     g_ctx->epoll_fd = -1;
     g_ctx->running  = 1;
@@ -1320,7 +1324,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 5. 安装信号处理器
      * ================================================================ */
-    if (setup_signals(&ctx) != 0) {
+    if (setup_signals(g_ctx) != 0) {
         LOG_ERROR("Failed to setup signal handlers");
         return 1;
     }
@@ -1328,7 +1332,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 6. 初始化代理子系统
      * ================================================================ */
-    if (proxy_init(&ctx) != 0) {
+    if (proxy_init(g_ctx) != 0) {
         LOG_ERROR("Failed to initialize proxy subsystem");
         return 1;
     }
@@ -1349,6 +1353,13 @@ int main(int argc, char *argv[])
      * ================================================================ */
     {
         uint16_t ethertype_n = htons(g_ctx->config.ethertype);
+
+        /* 检测 AF_PACKET 冲突（同一接口上已有其他实例使用此 EtherType） */
+        if (af_packet_detect_conflict(g_ctx->config.interface,
+                                       g_ctx->config.ethertype) != 0) {
+            LOG_WARN("AF_PACKET conflict detected on %s (EtherType=0x%04X)",
+                     g_ctx->config.interface, g_ctx->config.ethertype);
+        }
 
         g_ctx->raw_sock = af_packet_create(g_ctx->config.interface, ethertype_n, &g_ctx->ifindex);
         if (g_ctx->raw_sock < 0) {
@@ -1620,9 +1631,9 @@ int main(int argc, char *argv[])
 
                 if (now_ms - last_periodic_ms >= PERIODIC_INTERVAL_MS
                     || last_periodic_ms > now_ms) { /* 处理时间回绕 */
-                    channel_kcp_update(&ctx);
-                    channel_heartbeat(&ctx);
-                    channel_timeout_check(&ctx);
+                    channel_kcp_update(g_ctx);
+                    channel_heartbeat(g_ctx);
+                    channel_timeout_check(g_ctx);
                     last_periodic_ms = now_ms;
                 }
             }
@@ -1631,7 +1642,7 @@ int main(int argc, char *argv[])
             if (g_ctx->config.stats_enabled) {
                 uint32_t now_sec = time(NULL);
                 if (now_sec - last_stats_sec >= STATS_INTERVAL_SEC) {
-                    int active = channel_count(&ctx);
+                    int active = channel_count(g_ctx);
                     LOG_INFO("Stats: %d active channels, running=%d",
                              active, g_ctx->running);
                     last_stats_sec = now_sec;
@@ -1653,6 +1664,7 @@ int main(int argc, char *argv[])
      * ================================================================ */
     LOG_INFO("Shutting down...");
     cleanup(g_ctx);
+    free(g_ctx);
     LOG_INFO("KCP-over-AF_PACKET stopped.");
 
     return 0;

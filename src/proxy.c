@@ -777,7 +777,7 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                 return -1;
             }
             if (n == 0) {
-                break;
+                continue;
             }
 
             total_read += (int)n;

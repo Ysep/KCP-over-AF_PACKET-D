@@ -701,7 +701,6 @@ int af_packet_get_mtu(int sock, const char *if_name)
 /* ============================================================================
  * af_packet_detect_conflict
  *
- * TODO: Call in main.c before af_packet_create
  * ============================================================================ */
 
 int af_packet_detect_conflict(const char *if_name, uint16_t ethertype)

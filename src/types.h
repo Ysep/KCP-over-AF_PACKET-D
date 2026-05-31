@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
+#include <signal.h>
 #include <sys/types.h>
 
 /* ============================================================================
@@ -512,9 +513,9 @@ typedef struct {
     int             epoll_fd;           /* epoll 文件描述符 */
 
     /* 运行状态 */
-    volatile int    running;            /* 运行标志 */
-    volatile int    reload_requested;   /* 配置重载请求（SIGHUP） */
-    volatile int    ctl_requested;      /* 通道控制请求（SIGUSR1）：增量通道操作，非重载 */
+    volatile sig_atomic_t running;          /* 运行标志 */
+    volatile sig_atomic_t reload_requested; /* 配置重载请求（SIGHUP） */
+    volatile sig_atomic_t ctl_requested;    /* 通道控制请求（SIGUSR1）：增量通道操作，非重载 */
     char            config_path[MAX_CONFIG_PATH]; /* 配置文件路径（用于热重载） */
     uint32_t        next_dynamic_channel_id; /* 下一个动态分配的 channel_id（全局自增） */
     uint32_t        listener_base[MAX_CHANNELS];  /* 每个 listener 的 ID 池起始偏移 */
