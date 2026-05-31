@@ -672,6 +672,162 @@ static void cleanup(global_ctx_t *ctx)
     }
 }
 
+/* ---- 通道热重载：diff 新旧 channels[]，增/改/删 ---- */
+static void config_reload_channels(global_ctx_t *ctx,
+                                   const global_config_t *new_cfg)
+{
+    /* Step 1: 标记所有现存的 listener 通道 */
+    for (uint32_t i = 0; i < ctx->channel_hash_size; i++) {
+        channel_t *ch = ctx->channel_hash[i];
+        while (ch) {
+            if (ch->flags & CH_FLAG_STATIC_LISTENER)
+                ch->flags |= CH_FLAG_RELOAD_MARKED;
+            ch = ch->hash_next;
+        }
+    }
+
+    /* Step 2: 遍历新配置，匹配 + 增/改 */
+    for (int i = 0; i < new_cfg->channel_count; i++) {
+        const channel_config_t *new_ch = &new_cfg->channels[i];
+        channel_t *old_ch = channel_find(ctx, new_ch->channel_id);
+
+        if (old_ch && (old_ch->flags & CH_FLAG_STATIC_LISTENER)) {
+            /* 情况 A: channel_id 已存在 */
+            old_ch->flags &= ~CH_FLAG_RELOAD_MARKED;
+
+            if (!new_ch->enabled) {
+                /* 禁用：清除 STATIC_LISTENER → channel_destroy */
+                old_ch->flags &= ~CH_FLAG_STATIC_LISTENER;
+                channel_destroy(ctx, old_ch);
+                LOG_INFO("config_reload: channel %u disabled and destroyed",
+                         new_ch->channel_id);
+                continue;
+            }
+
+            if (channel_config_changed(old_ch, new_ch)) {
+                /* 修改通道：预检 → 关闭旧 listener → 更新配置 → 启动新 */
+                if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
+                    if (proxy_port_probe(new_ch->listen_addr,
+                                          new_ch->listen_port,
+                                          new_ch->is_tcp) != 0) {
+                        LOG_ERROR("config_reload: port %s:%u unavailable for "
+                                  "channel %u, keeping old listener unchanged",
+                                  new_ch->listen_addr, new_ch->listen_port,
+                                  old_ch->channel_id);
+                        continue;
+                    }
+                }
+
+                proxy_stop_listen(ctx, old_ch);
+                channel_update_config(old_ch, new_ch);
+                old_ch->listener_idx = (uint8_t)i;
+
+                if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
+                    if (proxy_start_listen(ctx, old_ch) != 0) {
+                        LOG_ERROR("config_reload: new listen failed for "
+                                  "channel %u after config change",
+                                  old_ch->channel_id);
+                    }
+                }
+                LOG_INFO("config_reload: channel %u updated", old_ch->channel_id);
+            } else {
+                /* 无变更，仅更新 listener_idx */
+                old_ch->listener_idx = (uint8_t)i;
+            }
+
+        } else if (new_ch->enabled) {
+            /* 情况 B: channel_id 不存在 → 新建 */
+            if (ctx->config.node_type == NODE_TYPE_FRONTEND &&
+                proxy_port_conflict(ctx, new_ch->listen_addr,
+                                     new_ch->listen_port,
+                                     new_ch->channel_id)) {
+                LOG_ERROR("config_reload: port %s:%u already in use, "
+                          "skipping new channel %u",
+                          new_ch->listen_addr, new_ch->listen_port,
+                          new_ch->channel_id);
+                continue;
+            }
+
+            channel_t *ch = channel_create(ctx, new_ch->channel_id,
+                                           CHANNEL_ROLE_LISTENER,
+                                           new_ch->listen_port,
+                                           new_ch->remote_port,
+                                           new_ch->listen_addr,
+                                           new_ch->remote_addr,
+                                           new_ch->is_tcp);
+            if (!ch) {
+                LOG_ERROR("config_reload: failed to create channel %u",
+                          new_ch->channel_id);
+                continue;
+            }
+
+            ch->raw_sock  = ctx->raw_sock;
+            ch->ifindex   = ctx->ifindex;
+            memcpy(ch->local_mac, ctx->local_mac, ETH_MAC_ADDR_LEN);
+            memcpy(ch->peer_mac,  ctx->peer_mac,  ETH_MAC_ADDR_LEN);
+            ch->ethertype = ctx->ethertype;
+            ch->flags     = CH_FLAG_STATIC_LISTENER;
+            ch->listener_idx = (uint8_t)i;
+
+            if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
+                if (proxy_start_listen(ctx, ch) != 0) {
+                    LOG_ERROR("config_reload: listen failed for new channel %u",
+                              new_ch->channel_id);
+                    ch->flags &= ~CH_FLAG_STATIC_LISTENER;
+                    channel_destroy(ctx, ch);
+                    continue;
+                }
+            }
+            LOG_INFO("config_reload: channel %u created", new_ch->channel_id);
+        }
+    }
+
+    /* Step 3: 清理未匹配的旧 listener（仍带 RELOAD_MARKED） */
+    for (uint32_t i = 0; i < ctx->channel_hash_size; i++) {
+        channel_t *ch = ctx->channel_hash[i];
+        while (ch) {
+            channel_t *next = ch->hash_next;
+            if ((ch->flags & CH_FLAG_STATIC_LISTENER) &&
+                (ch->flags & CH_FLAG_RELOAD_MARKED)) {
+                ch->flags &= ~CH_FLAG_STATIC_LISTENER;
+                channel_destroy(ctx, ch);
+                LOG_INFO("config_reload: channel %u removed", ch->channel_id);
+            } else {
+                ch->flags &= ~CH_FLAG_RELOAD_MARKED;
+            }
+            ch = next;
+        }
+    }
+
+    /* Step 4: 刷新 channels[] 数组（保留 disabled 条目保持索引稳定） */
+    channel_config_t updated_channels[MAX_CHANNELS];
+    int updated_count = 0;
+
+    for (int i = 0; i < new_cfg->channel_count; i++) {
+        updated_channels[updated_count++] = new_cfg->channels[i];
+    }
+
+    for (int i = 0; i < ctx->config.channel_count; i++) {
+        const channel_config_t *old = &ctx->config.channels[i];
+        int found = 0;
+        for (int j = 0; j < new_cfg->channel_count; j++) {
+            if (new_cfg->channels[j].channel_id == old->channel_id) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found && updated_count < MAX_CHANNELS) {
+            updated_channels[updated_count] = *old;
+            updated_channels[updated_count].enabled = 0;
+            updated_count++;
+        }
+    }
+
+    ctx->config.channel_count = updated_count;
+    memcpy(ctx->config.channels, updated_channels,
+           (size_t)updated_count * sizeof(channel_config_t));
+}
+
 /* ---- 配置热重载 ---- */
 static int config_reload(global_ctx_t *ctx, const char *config_path)
 {
@@ -685,10 +841,14 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
 
     if (validate_config(new_cfg) != 0) {
         LOG_ERROR("Config reload: validation failed");
+        free(new_cfg);
         return -1;
     }
 
-    /* Only update runtime-tunable params (not interface, MAC, channels) */
+    /* ---- 通道 diff 与增删改（best-effort，失败不回滚） ---- */
+    config_reload_channels(ctx, new_cfg);
+
+    /* Update runtime-tunable params (not interface, MAC) */
     ctx->config.crc_enabled        = new_cfg->crc_enabled;
     ctx->config.heartbeat_interval = new_cfg->heartbeat_interval;
     ctx->config.heartbeat_timeout  = new_cfg->heartbeat_timeout;

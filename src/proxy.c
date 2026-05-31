@@ -1073,6 +1073,81 @@ void proxy_close_local(channel_t *ch)
 }
 
 /*
+ * 关闭 listener 的 listen_fd（不销毁动态子通道）。
+ * 与 proxy_close_local() 的区别：不关闭 local_fd，不清空 recv_buf。
+ */
+void proxy_stop_listen(global_ctx_t *ctx, channel_t *ch)
+{
+    if (!ctx || !ch) return;
+
+    if (ch->listen_fd >= 0) {
+        LOG_INFO("proxy_stop_listen: stopping listener channel=%u fd=%d",
+                 ch->channel_id, ch->listen_fd);
+
+        if (ctx->epoll_fd >= 0) {
+            proxy_epoll_del(ctx, ch->listen_fd);
+        }
+        close(ch->listen_fd);
+        ch->listen_fd = -1;
+    }
+}
+
+/*
+ * 探测端口是否可用于监听（bind 测试，成功后立即关闭）。
+ * @return 0=可用, -1=不可用
+ */
+int proxy_port_probe(const char *addr, uint16_t port, int is_tcp)
+{
+    int                     family;
+    int                     fd;
+    struct sockaddr_storage sa;
+    socklen_t               sa_len;
+
+    family = resolve_addr(addr, port, &sa, &sa_len);
+    if (family < 0) return -1;
+
+    fd = socket(family,
+                is_tcp ? (SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC)
+                       : (SOCK_DGRAM  | SOCK_NONBLOCK | SOCK_CLOEXEC),
+                0);
+    if (fd < 0) return -1;
+
+    int optval = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+    if (bind(fd, (struct sockaddr *)&sa, sa_len) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+/*
+ * 检查端口是否已被其他 listener 通道占用。
+ * @return 1=有冲突, 0=无冲突
+ */
+int proxy_port_conflict(global_ctx_t *ctx, const char *listen_addr,
+                         uint16_t listen_port, uint32_t exclude_id)
+{
+    for (uint32_t i = 0; i < ctx->channel_hash_size; i++) {
+        channel_t *ch = ctx->channel_hash[i];
+        while (ch) {
+            if ((ch->flags & CH_FLAG_STATIC_LISTENER) &&
+                ch->listen_fd >= 0 &&
+                ch->channel_id != exclude_id &&
+                ch->listen_port == listen_port &&
+                strcmp(ch->listen_addr, listen_addr) == 0) {
+                return 1;
+            }
+            ch = ch->hash_next;
+        }
+    }
+    return 0;
+}
+
+/*
  * 获取通道本地套接字的 epoll 事件掩码
  */
 uint32_t proxy_get_events(channel_t *ch)

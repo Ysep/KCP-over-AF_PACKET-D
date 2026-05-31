@@ -120,4 +120,10 @@ int proxy_epoll_add(global_ctx_t *ctx, int fd, void *ptr);
  */
 int proxy_epoll_del(global_ctx_t *ctx, int fd);
 
+/* ---- 通道热重载辅助函数 ---- */
+void proxy_stop_listen(global_ctx_t *ctx, channel_t *ch);
+int  proxy_port_probe(const char *addr, uint16_t port, int is_tcp);
+int  proxy_port_conflict(global_ctx_t *ctx, const char *listen_addr,
+                         uint16_t listen_port, uint32_t exclude_id);
+
 #endif /* PROXY_H */

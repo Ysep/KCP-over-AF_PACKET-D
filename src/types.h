@@ -113,6 +113,7 @@ typedef enum {
 /* 通道角色 */
 /* 通道标志位 */
 #define CH_FLAG_STATIC_LISTENER 0x01        /* 静态 listener 通道（不被 destroy 销毁） */
+#define CH_FLAG_RELOAD_MARKED   0x02        /* reload 临时标记（增删改匹配用） */
 
 /* 通道角色 */
 typedef enum {

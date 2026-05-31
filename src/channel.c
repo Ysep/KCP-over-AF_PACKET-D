@@ -1546,6 +1546,36 @@ int channel_count(global_ctx_t *ctx)
 }
 
 /*
+ * 比较通道配置是否变更。
+ * @return 1=有变更, 0=无变更
+ */
+int channel_config_changed(const channel_t *ch,
+                           const channel_config_t *new_cfg)
+{
+    if (ch->listen_port != new_cfg->listen_port) return 1;
+    if (ch->remote_port != new_cfg->remote_port) return 1;
+    if (strcmp(ch->listen_addr, new_cfg->listen_addr) != 0) return 1;
+    if (strcmp(ch->remote_addr, new_cfg->remote_addr) != 0) return 1;
+    if (ch->is_tcp != new_cfg->is_tcp) return 1;
+    return 0;
+}
+
+/*
+ * 将新配置写入通道对象（不触碰运行时状态和 KCP 实例）。
+ */
+void channel_update_config(channel_t *ch,
+                           const channel_config_t *cfg)
+{
+    ch->listen_port = cfg->listen_port;
+    ch->remote_port = cfg->remote_port;
+    strncpy(ch->listen_addr, cfg->listen_addr, MAX_LISTEN_ADDR - 1);
+    ch->listen_addr[MAX_LISTEN_ADDR - 1] = '\0';
+    strncpy(ch->remote_addr, cfg->remote_addr, MAX_REMOTE_ADDR - 1);
+    ch->remote_addr[MAX_REMOTE_ADDR - 1] = '\0';
+    ch->is_tcp = cfg->is_tcp;
+}
+
+/*
  * 关闭所有通道（优雅关闭）
  *
  * 对所有 ESTABLISHED 状态的通道发送 FIN，

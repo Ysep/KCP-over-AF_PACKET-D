@@ -138,4 +138,8 @@ int channel_count(global_ctx_t *ctx);
  */
 void channel_close_all(global_ctx_t *ctx);
 
+/* ---- 通道热重载辅助函数 ---- */
+int  channel_config_changed(const channel_t *ch, const channel_config_t *cfg);
+void channel_update_config(channel_t *ch, const channel_config_t *cfg);
+
 #endif /* CHANNEL_H */
