@@ -50,46 +50,61 @@ client3 ──▶ accept ──▶ chan3 (KCP#3) ──▶ AF_PACKET    ← 新�
 }
 ```
 
-不再将 channel_id 用于实际数据通道。它作为 listen_fd 的标识。实际数据通道的 channel_id 动态分配。
+`channel_id` 不再用于实际数据通道传输。它作为 listen_fd 的标识。实际数据通道的 channel_id 动态分配。
+
+**`max_sessions` 默认值**：
+- `max_sessions` 未设置或为 0 → 默认 `1`（向后兼容单会话行为）
+- `max_sessions >= 2` → 启用多会话，每个新 accept 创建动态通道
+- `max_sessions <= 255`（每个 listener 的 256 ID 硬上限减自身 1）
+
+```
+现有配置（无 max_sessions）：等价于 max_sessions=1，行为不变
+新配置（max_sessions=256）：支持 255 并发 + 1 个 listener
+```
 
 ### 3. channel_id 管理
 
 引入 **ID 池**，将 channel_id 划分为两个层级：
 
-```
-    0 ──────────────────────────── 65535
-    │ listener 0│ listener 1│ ...   │
-    │ (0-255)   │ (256-511) │       │
-    └───────────┴───────────┴───────┘
+```c
+/* 分配器用 array index（不是 channel_id），RESPONDER 反向映射一致 */
+listener array index = 0 → 数据通道 ID 范围 [257, 512]
+listener array index = 1 → 数据通道 ID 范围 [513, 768]
+listener array index = N → 数据通道 ID 范围 [257+N*256, 512+N*256]
 ```
 
-**每个 listener 独占 256 个 ID**：
-- listener channel_id = 0  → 数据通道 ID 范围 256-511
-- listener channel_id = 1  → 数据通道 ID 范围 512-767
-- 类推
-
-**RESPONDER 通道通过 `channel_id / 256` 找到对应的 listener**，从中取 `remote_addr:remote_port` 进行 `proxy_connect_remote`。
+**为什么用 array index 而不是 channel_id**：配置中的 `channel_id` 可以是任意值（如 `1`），但 RESPONDER 收到 data ID 后需要通过 `/256` 反向找到对应的 listener。用 **连续、无间隙的 array index**确保映射正确。
 
 管理算法：
 ```c
-/* 按 listener 分配 ID。listener_idx = listener->channel_id */
-uint16_t alloc_channel_id(global_ctx_t *ctx, uint16_t base_channel_id)
+/* next_id: ctx->next_dynamic_channel_id（persistent per-ctx） */
+uint16_t alloc_channel_id(global_ctx_t *ctx, int listener_idx)
 {
-    uint16_t base = (uint16_t)(base_channel_id * 256) + 1;
-    uint16_t max  = base + 255;
-    if (base < 256) base = 256;
+    uint16_t base = (uint16_t)(257 + (uint32_t)listener_idx * 256);
+    uint16_t max  = (uint16_t)(base + 255);
+
+    if (ctx->next_dynamic_channel_id < base)
+        ctx->next_dynamic_channel_id = base;
+    if (ctx->next_dynamic_channel_id > max)
+        ctx->next_dynamic_channel_id = base;
 
     for (int attempt = 0; attempt < 256; attempt++) {
-        if (next_data_channel_id < base) next_data_channel_id = base;
-        if (next_data_channel_id > max)  next_data_channel_id = base;
-        uint16_t id = next_data_channel_id++;
+        uint16_t id = ctx->next_dynamic_channel_id++;
+        if (id > max) ctx->next_dynamic_channel_id = base;
         if (channel_find(ctx, id) == NULL) return id;
     }
     return 0;  /* 耗尽 */
 }
 ```
 
-- `base_channel_id`：listener 的 channel_id（0-255）
+RESPONDER 反向映射：
+```c
+/* 数据 ID → listener array index */
+uint16_t listener_idx = (hdr->channel_id - 257) / 256;
+if (listener_idx < g_ctx->config.channel_count) {
+    cfg = &g_ctx->config.channels[listener_idx];
+}
+```
 
 ### 4. accept 流程改造
 
@@ -162,40 +177,57 @@ backend 收到 SYN 时，需要 `remote_addr:remote_port` 才能 `proxy_connect_
 
 **当前代码的局限**（channel.c:688）：
 ```c
-cfg = channel_lookup_config(hdr->channel_id);  // 255+ 查不到 → raddr = "0.0.0.0"
+cfg = channel_lookup_config(hdr->channel_id);  // 256+ 查不到 → raddr = "0.0.0.0"
 ```
 
-`channel_lookup_config` 按 `channel_id` 查静态配置。动态 ID（256+）不在配置中，返回 NULL，导致 `raddr = "0.0.0.0"`、`rport = 0`。
+`channel_lookup_config` 按 `channel_id` 查静态配置。动态 ID（256+）不在配置中，返回 NULL。
 
-**修复方案**：引入 `channel_id → listener_id` 的映射。
-
-```
-config.channels[0].channel_id = 1    (listener, remote_addr = "192.168.1.67", remote_port = 22)
-config.channels[0].base_channel_id = 1
-
-动态 channel_id = 256 → 提取 base = channel_id & 0xFF00  → 找到 listener
-```
-
-更简洁的方案：**SYN 帧的 data_len 携带 channel_id 和 remote 映射**。但改动协议不兼容。
-
-**最终方案**：每个 listener 绑定一个 `target_base`（在 channel_config_t 额外存储），RESPONDER 创建时用 `hdr->channel_id >> 8` 找到对应的 listener：
+**改造方案**：用 `(data_id - 257) / 256` 反向映射到 listener 的 array index：
 
 ```c
-/* SYN arrive at channel_id=256 → base=256/256=1 → listener #1 */
-uint16_t base = hdr->channel_id / 256;  // 0-255 区间
-cfg = &g_ctx->config.channels[base];    // 直接用 base 索引
-raddr = cfg->remote_addr;
-rport = cfg->remote_port;
+/* 动态 ID → listener array index（对应 alloc_channel_id 的 listener_idx）*/
+uint16_t base_idx = (hdr->channel_id - 257) / 256;
+if (base_idx < g_ctx->config.channel_count) {
+    cfg = &g_ctx->config.channels[base_idx];
+    lport = cfg->listen_port;
+    rport = cfg->remote_port;
+    laddr = cfg->listen_addr;
+    raddr = cfg->remote_addr;
+    tcp   = cfg->is_tcp;
+}
 ```
 
-同时收紧 `alloc_channel_id` 为每个 listener 隔离区间：
-| listener base | 动态 ID 范围 |
-|---------------|-------------|
-| 0 | 256–511 |
-| 1 | 512–767 |
-| ... | ... |
+### 7. Listener 通道初始化
 
-### 7. 资源上限
+新增 `CHANNEL_ROLE_LISTENER`（角色值 = 2），与现有 INITIATOR/RESPONDER 并列。
+
+区别：
+
+| 特性 | INITIATOR | RESPONDER | LISTENER |
+|------|-----------|-----------|----------|
+| 自动发 SYN | ✅ 创建后立即发 | ❌ | ❌ |
+| 绑定 local_fd | ✅ | ❌（由 proxy_connect 分配） | ❌ |
+| 绑定 listen_fd | ❌ | ✅（backend 模式） | ✅ |
+| 自动销毁 | ❌（正常 FIN 后） | ❌（正常 FIN 后） | ❌（永不，仅 shutdown） |
+| 创建者 | accept | backend SYN handler | main.c 静态初始化 |
+
+启动流程（main.c）：
+```c
+for each cfg in config.channels:
+    ch = channel_create(ctx, cfg.channel_id, CHANNEL_ROLE_LISTENER, ...)
+    if (ch) {
+        ch->flags |= CH_FLAG_STATIC_LISTENER;
+        if (cfg.max_sessions == 1) {
+            proxy_start_listen(ctx, ch);  // 单会话：现有行为
+        } else {
+            proxy_start_listen(ctx, ch);  // 多会话：仅监听，不连接
+        }
+    }
+```
+
+`CHANNEL_ROLE_LISTENER` 不发送 SYN，不绑定 `local_fd`。`listen_fd` 由 `proxy_start_listen` 设置。所有 accept 来的连接走 Section 4 的动态 INITIATOR 通道。
+
+### 8. 资源上限
 
 | 资源 | 单会话 | 多会话 | 限制因素 |
 |------|--------|--------|---------|
@@ -206,7 +238,7 @@ rport = cfg->remote_port;
 | **256 并发约需** | — | ~2.5MB | 可接受 |
 | **4096 并发约需** | — | ~40MB | 可接受（需多个 listener） |
 
-### 8. 清理与生命周期
+### 9. 清理与生命周期
 
 | 事件 | 动作 | 通道类型 |
 |------|------|---------|
@@ -219,7 +251,7 @@ rport = cfg->remote_port;
 
 **关键区别：listener 通道不会被 `channel_destroy` 销毁。** 其 `listen_fd` 仅由自身错误处理逻辑关闭和重建。`channel_destroy()` 添加 listener/dynamic 区分。
 
-### 9. UDP 设计
+### 10. UDP 设计 设计
 
 UDP（`is_tcp: false`）的 `listen_fd == local_fd`（共用同一个套接字），未做客户端级区分。
 
@@ -238,14 +270,14 @@ if (!ch->is_tcp) {
 }
 ```
 
-### 10. 兼容性
+### 11. 兼容性性
 
 - **无需改动 AF_PACKET 帧格式**（`channel_id` 字段已在 MyProto 协议中，16bit）
 - **无需改动 KCP 集成**（读写接口不变，只有 channel 数量变化）
 - **配置向后兼容**（旧配置只有一个 channel，外加 256 并发上限，行为与现在一致）
 - **对端无需升级**（dynamic_initiator 发出的 SYN 对 responder 来说就是正常 SYN）
 
-### 11. 需修复的代码缺陷（更新）
+### 12. 需修复的代码缺陷（更新）
 
 以下 5 个问题需在实现时同步修复（R3→N1，R6→N6）：
 
@@ -279,9 +311,7 @@ if (!ch->is_tcp) {
 +          ? &g_ctx->config.channels[base_idx] : NULL;
 ```
 
-**N3: accept 失败路径泄漏** (proxy.c take-accept)
-
-```diff
+**N3: accept 失败路径泄漏** (proxy.c take-``diff
 +    if (proxy_epoll_add(ctx, client_fd, ch) < 0) {
 +        close(client_fd);
 +        channel_destroy(ctx, ch);
@@ -296,17 +326,19 @@ if (!ch->is_tcp) {
 +    /* ACK sent after proxy_connect_remote succeeds */
 ```
 
-### 12. 工作分解（终版）
+### 13. 工作分解（终版）
 
 | # | 步骤 | 文件 | 改动 | 风险 | 依赖 |
 |---|------|------|------|------|------|
 | 1 | `CH_FLAG_STATIC_LISTENER` + destroy 防护 | `types.h` / `channel.c` | 5 行 | 低 | — |
-| 2 | listen_fd 错误恢复（epoll_del + 重建） | `proxy.c` | 8 行 | 低 | #1 |
-| 3 | `alloc_channel_id` ID 池（按 listener 分区） | `channel.c` | 35 行 | 低 | — |
-| 4 | SYN handler：RESPONDER 目标地址继承 | `channel.c` | 5 行 | 低 | #3 |
-| 5 | `proxy_accept` 多会话 + 泄漏修复 | `proxy.c` | 30 行 | 中 | #3, #4 |
-| 6 | listener 通道 init 设标志位 | `main.c` | 3 行 | 低 | #1 |
-| 7 | ACK 移到 connect 成功后 | `channel.c` | 5 行 | 低 | #4 |
-| 8 | UDP 跳过 accept 多会话 | `proxy.c` | 3 行 | 低 | #5 |
-| 9 | 测试：256 并发 TCP | `tests/` | 60 行 | 低 | #1-#8 |
-| 10 | listener 在 shutdown 中统一清理 | `channel.c` | 3 行 | 低 | #1 |
+| 2 | 新增 `CHANNEL_ROLE_LISTENER`（不发 SYN） | `types.h` / `channel.c` | 5 行 | 低 | — |
+| 3 | listen_fd 错误恢复（epoll_del + 重建） | `proxy.c` | 8 行 | 低 | #1 |
+| 4 | `alloc_channel_id` ID 池（array index 分区） | `channel.c` | 35 行 | 低 | — |
+| 5 | SYN handler：RESPONDER 目标地址继承（array index 反向映射） | `channel.c` | 5 行 | 低 | #4 |
+| 6 | `proxy_accept` 多会话 + 泄漏修复 | `proxy.c` | 30 行 | 中 | #4, #5 |
+| 7 | listener 通道 init（`CH_FLAG_STATIC_LISTENER` + `CHANNEL_ROLE_LISTENER`） | `main.c` | 5 行 | 低 | #1, #2 |
+| 8 | ACK 移到 connect 成功后 | `channel.c` | 5 行 | 低 | #5 |
+| 9 | UDP 跳过 accept 多会话 | `proxy.c` | 3 行 | 低 | #6 |
+| 10 | `next_dynamic_channel_id` 字段 + 初始化 | `types.h` / `main.c` | 3 行 | 低 | #4 |
+| 11 | 测试：256 并发 TCP | `tests/` | 60 行 | 低 | #1-#10 |
+| 12 | listener 在 shutdown 中统一清理 | `channel.c` | 3 行 | 低 | #2 |
