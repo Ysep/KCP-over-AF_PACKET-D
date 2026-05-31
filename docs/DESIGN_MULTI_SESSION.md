@@ -408,3 +408,175 @@ if (!ch->is_tcp) {
 | **合计** | **~302** |
 
 零新文件，零删除现有代码。
+
+---
+
+# Part III: uint16_t → uint32_t channel_id 升级
+
+## 1. 动机
+
+| 参数 | 当前 | 目标 |
+|------|------|------|
+| 最大静态 listener | 254 | 50000+ |
+| 每 listener 并发 | 256 (固定) | 可配（`max_sessions`） |
+| channel_id 类型 | `uint16_t` | `uint32_t` |
+
+## 2. 帧格式变更
+
+```
+旧 (8 bytes):                          新 (10 bytes):
+┌────────┬─────┬─────┬────────┬──────┐  ┌───────────────┬─────┬────────┬──────┐
+│ chan_id│flags│rsvd │pay_len │ crc  │  │   chan_id     │flags│pay_len │ crc  │
+│ uint16 │ u8  │ u8  │ uint16 │ u16  │  │   uint32      │ u8  │ uint16 │ u16  │
+└────────┴─────┴─────┴────────┴──────┘  └───────────────┴─────┴────────┴──────┘
+   0   1   2   3   4   5   6   7             0   1   2   3   4   5   6   7   8   9
+```
+
+`reserved` 字段消灭——合并到 `channel_id` 高 16 位。
+
+## 3. 数据结构变更
+
+### types.h
+
+```c
+// types.h: 全局替换 uint16_t channel_id → uint32_t channel_id
+typedef uint32_t channel_id_t;  // 新增类型别名
+
+typedef struct {
+    channel_id_t channel_id;     // 原 uint16_t
+    uint16_t     listen_port;
+    ...
+} channel_config_t;
+
+typedef struct channel_s {
+    channel_id_t   channel_id;   // 原 uint16_t
+    ...
+} channel_t;
+```
+
+`HEARTBEAT_CH_ID`: `0xFFFF` → `0xFFFFFFFF`
+
+### myproto.h
+
+```c
+typedef struct __attribute__((packed)) {
+    uint32_t channel_id;   // 原 uint16_t
+    uint8_t  flags;
+    uint16_t payload_len;
+    uint16_t header_crc;
+} myproto_hdr_t;
+
+_Static_assert(sizeof(myproto_hdr_t) == 10, "must be 10 bytes");
+```
+
+### channel.h / channel.c
+
+```c
+// alloc_channel_id 重写：去掉 256 硬上限，改为 max_sessions 决定池宽
+uint32_t alloc_channel_id(global_ctx_t *ctx, int listener_idx);
+
+// channel_find / channel_hash_insert: hash 函数适配 uint32_t
+static uint32_t channel_hash(uint32_t id, uint32_t size) {
+    return id % size;
+}
+```
+
+## 4. ID 池重设计
+
+```
+旧：每个 listener 固定 256 槽位
+  listener 0: [257,  512]
+  listener 1: [513,  768]
+  ...
+
+新：每个 listener 可配 max_sessions 个槽位
+  listener 0 (max_sessions=10):    [65536, 65545]
+  listener 1 (max_sessions=5000):  [65546, 70545]
+  listener 2 (max_sessions=1):     [70546, 70546]
+  ...
+
+基址起始: DYNAMIC_CHANNEL_BASE = 65536
+累积偏移: ctx->listener_base[i] (启动时预计算)
+```
+
+```c
+void build_listener_bases(global_ctx_t *ctx) {
+    uint32_t offset = DYNAMIC_CHANNEL_BASE;
+    for (int i = 0; i < ctx->config.channel_count; i++) {
+        ctx->listener_base[i] = offset;
+        ctx->listener_next[i] = offset;
+        offset += ctx->config.channels[i].max_sessions;
+    }
+}
+
+uint32_t alloc_channel_id(global_ctx_t *ctx, int listener_idx) {
+    uint32_t base = ctx->listener_base[listener_idx];
+    uint32_t max  = base + ctx->config.channels[listener_idx].max_sessions - 1;
+    // round-robin within bounds
+    for (int attempt = 0; attempt < ctx->config.channels[listener_idx].max_sessions; attempt++) {
+        uint32_t id = ctx->listener_next[listener_idx]++;
+        if (id > max) ctx->listener_next[listener_idx] = base;
+        if (channel_find(ctx, id) == NULL) return id;
+    }
+    return 0;
+}
+```
+
+RESPONDER 反向映射：
+```c
+int find_listener_by_id(uint32_t data_id) {
+    if (data_id < DYNAMIC_CHANNEL_BASE) return -1;
+    for (int i = channel_count - 1; i >= 0; i--) {
+        if (data_id >= listener_base[i]) return i;
+    }
+    return -1;
+}
+```
+
+## 5. 改动清单
+
+| 文件 | 改动 | 行数 |
+|------|------|------|
+| `myproto.h` | 帧头 8→10 字节，`channel_id` `uint32_t` | ±5 |
+| `types.h` | 全局 `uint16_t`→`uint32_t`，新增 `listener_base[MAX_CHANNELS]`、`listener_next[MAX_CHANNELS]` | ±15 |
+| `channel.h` | 函数声明适配 | ±5 |
+| `channel.c` | alloc 重写，`channel_lookup_config` 适配，hash 函数适配 | ±40 |
+| `proxy.c` | `proxy_accept` 适配 `uint32_t` | ±5 |
+| `main.c` | 启动时调 `build_listener_bases()` | ±5 |
+| `tests/` | 4 个测试文件适配 | ±30 |
+| **合计** | | **~105** |
+
+## 6. 迁移步骤
+
+```bash
+# 1. 停止两端服务
+systemctl stop kcp-afpacket  # frontend + backend
+
+# 2. 替换二进制
+cp kcp-afpacket-v3 /usr/local/bin/kcp-afpacket
+
+# 3. 更新配置（无变更）
+# config.json 不变，channel_id 仍是 int，JSON 自动转 uint32_t
+
+# 4. 启动
+systemctl start kcp-afpacket  # 先 backend，再 frontend
+```
+
+零数据库迁移，零配置变更，仅替换二进制。
+
+## 7. 兼容性声明
+
+| 方向 | 结果 |
+|------|------|
+| 新→新 | ✅ |
+| 新→旧 | ❌ 帧 CRC 失败，静默丢弃 |
+| 旧→新 | ❌ 8 字节帧 → 读 10 字节越界 |
+| 混合运行 | ❌ 不可混跑，必须统一停机升级 |
+
+## 8. 常量上限调整
+
+| 常量 | 旧值 | 新值 | 原因 |
+|------|------|------|------|
+| `MAX_CHANNELS` | 4096 | 65536 | 50000 listener + 冗余 |
+| `max_channels` 默认 | 4096 | 65536 | 与 MAX_CHANNELS 一致 |
+| `channel_hash_size` | 2×max_channels | 2×max_channels | 不变 |
