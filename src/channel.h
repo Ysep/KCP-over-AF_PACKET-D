@@ -34,7 +34,7 @@ void channel_shutdown(global_ctx_t *ctx);
  * @param listener_idx listener 在 config.channels[] 中的 array index
  * @return             成功返回通道 ID，失败返回 0
  */
-uint16_t alloc_channel_id(global_ctx_t *ctx, int listener_idx);
+uint32_t alloc_channel_id(global_ctx_t *ctx, int listener_idx);
 
 /*
  * 创建新通道
@@ -48,7 +48,7 @@ uint16_t alloc_channel_id(global_ctx_t *ctx, int listener_idx);
  * @param is_tcp     TCP 标志
  * @return           成功返回通道指针，失败返回 NULL
  */
-channel_t *channel_create(global_ctx_t *ctx, uint16_t channel_id,
+channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
                           channel_role_t role,
                           uint16_t listen_port, uint16_t remote_port,
                           const char *listen_addr, const char *remote_addr,
@@ -67,7 +67,7 @@ void channel_destroy(global_ctx_t *ctx, channel_t *ch);
  * @param channel_id 通道 ID
  * @return           找到返回通道指针，未找到返回 NULL
  */
-channel_t *channel_find(global_ctx_t *ctx, uint16_t channel_id);
+channel_t *channel_find(global_ctx_t *ctx, uint32_t channel_id);
 
 /*
  * 处理接收到的帧，路由到正确的通道

@@ -241,15 +241,15 @@ static void test_header_build_validate(void)
         CHECK(rc == 0, "parse_frame failed");
 
         /* Verify magic = 0x4D50 */
-        CHECK(hdr.magic == MYPROTO_MAGIC, "magic mismatch");
+        CHECK(hdr.magic ==  "magic mismatch");
         /* Verify version = 0x01 */
-        CHECK(hdr.version == MYPROTO_VERSION, "version mismatch");
+        CHECK(hdr.version ==  "version mismatch");
         /* Verify flags = MPF_SYN */
         CHECK(hdr.flags == MPF_SYN, "flags mismatch");
         /* Verify channel_id = 42 */
         CHECK(hdr.channel_id == 42, "channel_id mismatch");
         /* Ctrl frames have data_len=0 */
-        CHECK(hdr.data_len == 0, "ctrl data_len should be 0");
+        CHECK(hdr.payload_len == 0, "ctrl data_len should be 0");
 
         /* validate_hdr should pass */
         CHECK(myproto_validate_hdr(&hdr) == 0, "validate_hdr rejected valid hdr");
@@ -280,11 +280,11 @@ static void test_header_build_validate(void)
                                      &parsed_payload, &parsed_len);
         CHECK(rc == 0, "parse_frame failed for data frame");
 
-        CHECK(hdr.magic == MYPROTO_MAGIC, "data frame magic mismatch");
-        CHECK(hdr.version == MYPROTO_VERSION, "data frame version mismatch");
+        CHECK(hdr.magic ==  "data frame magic mismatch");
+        CHECK(hdr.version ==  "data frame version mismatch");
         CHECK(hdr.flags == 0, "data frame flags mismatch");
         CHECK(hdr.channel_id == 42, "data frame channel_id mismatch");
-        CHECK(hdr.data_len == 100, "data frame data_len mismatch");
+        CHECK(hdr.payload_len == 100, "data frame data_len mismatch");
         CHECK(parsed_len == 100, "parsed payload_len mismatch");
         CHECK(memcmp(parsed_payload, payload_data, 100) == 0, "payload content mismatch");
     }
@@ -297,7 +297,7 @@ static void test_header_build_validate(void)
         bad_hdr.version    = MYPROTO_VERSION;
         bad_hdr.flags      = 0;
         bad_hdr.channel_id = 1;
-        bad_hdr.data_len   = 0;
+        bad_hdr.payload_len   = 0;
 
         /* A's validate_hdr should reject */
         CHECK(myproto_validate_hdr(&bad_hdr) != 0, "validate_hdr accepted bad magic");
@@ -339,7 +339,7 @@ static void test_zero_len_frame(void)
     size_t payload_len = 0;
     int rc = myproto_parse_frame(buf, (size_t)len, &hdr, &payload, &payload_len);
     CHECK(rc == 0, "parse_frame failed");
-    CHECK(hdr.data_len == 0, "data_len should be 0");
+    CHECK(hdr.payload_len == 0, "data_len should be 0");
     CHECK(payload_len == 0, "payload_len should be 0");
     CHECK(myproto_is_data_frame(hdr.flags) == 1, "zero-flags should be data frame");
 
@@ -402,7 +402,7 @@ static void test_max_channel_id(void)
         bad_hdr.version    = MYPROTO_VERSION;
         bad_hdr.flags      = 0;
         bad_hdr.channel_id = 0xFFFE;  /* B's test value */
-        bad_hdr.data_len   = 0;
+        bad_hdr.payload_len   = 0;
 
         CHECK(myproto_validate_hdr(&bad_hdr) != 0,
               "A should reject channel_id >= MAX_CHANNELS");
@@ -441,7 +441,7 @@ static void test_heartbeat_id(void)
         hb_hdr.version    = MYPROTO_VERSION;
         hb_hdr.flags      = MPF_PING;
         hb_hdr.channel_id = HEARTBEAT_CH_ID;
-        hb_hdr.data_len   = 0;
+        hb_hdr.payload_len   = 0;
 
         CHECK(myproto_validate_hdr(&hb_hdr) == 0,
               "A should accept HEARTBEAT_CH_ID=0xFFFF");
@@ -582,8 +582,8 @@ static void test_frame_roundtrip(void)
     CHECK(rc == 0, "parse_frame failed");
 
     /* Verify B's expected values */
-    CHECK(hdr_in.magic == MYPROTO_MAGIC, "magic != 0x4D50");
-    CHECK(hdr_in.version == MYPROTO_VERSION, "version != 0x01");
+    CHECK(hdr_in.magic ==  "magic != 0x4D50");
+    CHECK(hdr_in.version ==  "version != 0x01");
     CHECK(hdr_in.flags == MPF_CRYPTO, "flags != MPF_CRYPTO");
     CHECK(hdr_in.channel_id == 0x42, "channel_id != 0x42");
     CHECK(hdr_in.data_len == (uint16_t)plen, "data_len mismatch");
@@ -642,9 +642,9 @@ static void test_control_frames(void)
             printf("\n         %s: flags mismatch (got 0x%02X, expected 0x%02X)\n",
                    names[i], hdr.flags, flags[i]);
         }
-        if (hdr.data_len != 0) {
+        if (hdr.payload_len != 0) {
             printf("\n         %s: data_len should be 0 (got %u)\n",
-                   names[i], hdr.data_len);
+                   names[i], hdr.payload_len);
         }
         if (!myproto_is_ctrl_frame(flags[i])) {
             printf("\n         %s: should be detected as ctrl frame\n", names[i]);
@@ -682,7 +682,7 @@ static void test_frame_boundaries(void)
         hdr.version    = MYPROTO_VERSION;
         hdr.flags      = 0;
         hdr.channel_id = 0;
-        hdr.data_len   = KCP_MTU_CONSERVATIVE;
+        hdr.payload_len   = KCP_MTU_CONSERVATIVE;
 
         uint8_t buf[MAX_FRAME_SIZE];
         ssize_t len = myproto_build_frame(buf, sizeof(buf), &hdr,
@@ -701,7 +701,7 @@ static void test_frame_boundaries(void)
         hdr.version    = MYPROTO_VERSION;
         hdr.flags      = 0;
         hdr.channel_id = 0;
-        hdr.data_len   = 0;
+        hdr.payload_len   = 0;
 
         uint8_t buf[MAX_FRAME_SIZE];
         ssize_t len = myproto_build_frame(buf, sizeof(buf), &hdr, NULL, 0, 0);
@@ -810,7 +810,7 @@ static void test_multi_channel_frames(void)
 
     int i;
     for (i = 0; i < 8; i++) {
-        uint16_t id = (uint16_t)(i * 30 + 1);  /* adapted: 1, 31, 61, 91, 121, 151, 181, 211 */
+        uint32_t id = (uint16_t)(i * 30 + 1);  /* adapted: 1, 31, 61, 91, 121, 151, 181, 211 */
         uint8_t flags = (i % 2 == 0) ? 0 : MPF_CRYPTO;
         uint8_t payload_data[8];
         memset(payload_data, (uint8_t)(i + 1), (size_t)(i + 1));
@@ -836,7 +836,7 @@ static void test_multi_channel_frames(void)
               "parse_frame failed for multi-channel test");
 
         CHECK(hdr.channel_id == id, "channel_id mismatch");
-        CHECK(hdr.data_len == (uint16_t)(i + 1), "data_len mismatch");
+        CHECK(hdr.payload_len == (uint16_t)(i + 1), "data_len mismatch");
         CHECK(hdr.flags == flags, "flags mismatch");
         CHECK(payload_len == (size_t)(i + 1), "payload_len mismatch");
         CHECK(memcmp(payload, payload_data, (size_t)(i + 1)) == 0,

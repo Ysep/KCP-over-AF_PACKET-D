@@ -474,7 +474,7 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
             ch->listener_idx < ctx->config.channel_count &&
             ctx->config.channels[ch->listener_idx].max_sessions > 1) {
 
-            uint16_t new_id = alloc_channel_id(ctx, ch->listener_idx);
+            uint32_t new_id = alloc_channel_id(ctx, ch->listener_idx);
             if (new_id == 0) {
                 LOG_WARN("proxy_accept: channel ID exhausted for listener %u",
                          ch->channel_id);

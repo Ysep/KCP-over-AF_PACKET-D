@@ -79,7 +79,7 @@ int myproto_parse_frame(const uint8_t *data, size_t data_len,
  * @return           成功返回帧总长度，失败返回 -1
  */
 ssize_t myproto_build_ctrl_frame(uint8_t *buf, size_t buf_size,
-                                 uint16_t channel_id, uint8_t flags,
+                                 uint32_t channel_id, uint8_t flags,
                                  int crc_enabled);
 
 /*
@@ -94,7 +94,7 @@ ssize_t myproto_build_ctrl_frame(uint8_t *buf, size_t buf_size,
  * @return           成功返回帧总长度（含 CRC），失败返回 -1
  */
 ssize_t myproto_build_data_frame(uint8_t *buf, size_t buf_size,
-                                 uint16_t channel_id, uint8_t flags,
+                                 uint32_t channel_id, uint8_t flags,
                                  const uint8_t *data, size_t data_len,
                                  int crc_enabled);
 

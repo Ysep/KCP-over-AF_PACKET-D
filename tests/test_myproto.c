@@ -55,11 +55,9 @@ static void test_hdr_roundtrip(void)
 
     myproto_hdr_t hdr_out, hdr_in;
     memset(&hdr_out, 0, sizeof(hdr_out));
-    hdr_out.magic      = MYPROTO_MAGIC;
-    hdr_out.version    = MYPROTO_VERSION;
     hdr_out.flags      = MPF_DATA;
     hdr_out.channel_id = 42;
-    hdr_out.data_len   = (uint16_t)payload_len;
+    hdr_out.payload_len = (uint16_t)payload_len;
 
     /* Build frame */
     uint8_t buf[MAX_FRAME_SIZE];
@@ -84,14 +82,6 @@ static void test_hdr_roundtrip(void)
     }
 
     /* Verify all header fields */
-    if (hdr_in.magic != MYPROTO_MAGIC) {
-        FAIL("magic mismatch");
-        return;
-    }
-    if (hdr_in.version != MYPROTO_VERSION) {
-        FAIL("version mismatch");
-        return;
-    }
     if (hdr_in.flags != MPF_DATA) {
         FAIL("flags mismatch");
         return;
@@ -100,8 +90,8 @@ static void test_hdr_roundtrip(void)
         FAIL("channel_id mismatch");
         return;
     }
-    if (hdr_in.data_len != payload_len) {
-        FAIL("data_len mismatch");
+    if (hdr_in.payload_len != payload_len) {
+        FAIL("payload_len mismatch");
         return;
     }
 
@@ -147,11 +137,9 @@ static void test_crc_append_and_verify(void)
 
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_DATA;
     hdr.channel_id = 10;
-    hdr.data_len   = (uint16_t)data_len;
+    hdr.payload_len = (uint16_t)data_len;
 
     uint8_t buf[MAX_FRAME_SIZE];
 
@@ -311,11 +299,9 @@ static void test_validate_hdr_valid(void)
 
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_DATA;
     hdr.channel_id = 100;
-    hdr.data_len   = 100;
+    hdr.payload_len = 100;
 
     if (myproto_validate_hdr(&hdr) != 0) {
         FAIL("valid header rejected");
@@ -325,40 +311,36 @@ static void test_validate_hdr_valid(void)
     OK();
 }
 
-static void test_validate_hdr_bad_magic(void)
+static void test_validate_hdr_bad_channel_id(void)
 {
-    TEST("validate_hdr with bad magic");
+    TEST("validate_hdr with bad channel_id");
 
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = 0xBEEF;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_DATA;
-    hdr.channel_id = 100;
-    hdr.data_len   = 100;
+    hdr.channel_id = MAX_CHANNELS + 1;
+    hdr.payload_len = 100;
 
     if (myproto_validate_hdr(&hdr) == 0) {
-        FAIL("bad magic not rejected");
+        FAIL("bad channel_id not rejected");
         return;
     }
 
     OK();
 }
 
-static void test_validate_hdr_bad_version(void)
+static void test_validate_hdr_heartbeat_channel_id(void)
 {
-    TEST("validate_hdr with bad version");
+    TEST("validate_hdr with HEARTBEAT_CH_ID");
 
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = 0x99;
-    hdr.flags      = MPF_DATA;
-    hdr.channel_id = 100;
-    hdr.data_len   = 100;
+    hdr.flags      = MPF_PING;
+    hdr.channel_id = HEARTBEAT_CH_ID;
+    hdr.payload_len = 0;
 
-    if (myproto_validate_hdr(&hdr) == 0) {
-        FAIL("bad version not rejected");
+    if (myproto_validate_hdr(&hdr) != 0) {
+        FAIL("HEARTBEAT_CH_ID should be accepted");
         return;
     }
 
@@ -367,18 +349,16 @@ static void test_validate_hdr_bad_version(void)
 
 static void test_validate_hdr_oversize_data(void)
 {
-    TEST("validate_hdr with oversize data_len");
+    TEST("validate_hdr with oversize payload_len");
 
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_DATA;
     hdr.channel_id = 100;
-    hdr.data_len   = ETH_MAX_PAYLOAD + 1;
+    hdr.payload_len = ETH_MAX_PAYLOAD + 1;
 
     if (myproto_validate_hdr(&hdr) == 0) {
-        FAIL("oversize data_len not rejected");
+        FAIL("oversize payload_len not rejected");
         return;
     }
 
@@ -447,10 +427,10 @@ static void test_ctrl_frame_types(void)
             return;
         }
 
-        /* Control frames must have data_len == 0 */
-        if (hdr.data_len != 0) {
-            printf("(data_len=%u) ", hdr.data_len);
-            FAIL("data_len should be 0 for control frames");
+        /* Control frames must have payload_len == 0 */
+        if (hdr.payload_len != 0) {
+            printf("(payload_len=%u) ", hdr.payload_len);
+            FAIL("payload_len should be 0 for control frames");
             return;
         }
 
@@ -555,17 +535,15 @@ static void test_overflow_build_frame(void)
 
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_DATA;
     hdr.channel_id = 1;
-    hdr.data_len   = 100;
+    hdr.payload_len = 100;
 
     const char *payload = "Some payload data here";
     size_t payload_len = strlen(payload);
 
     /* Pass a buffer that's too small */
-    uint8_t tiny_buf[8]; /* only 8 bytes, less than header + payload */
+    uint8_t tiny_buf[MYPROTO_HDR_SIZE]; /* only header size, no room for payload */
 
     ssize_t ret = myproto_build_frame(tiny_buf, sizeof(tiny_buf),
                                       &hdr, (const uint8_t*)payload,
@@ -818,10 +796,8 @@ static void test_null_ptr_guards(void)
 
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.channel_id = 1;
-    hdr.data_len   = 10;
+    hdr.payload_len = 10;
 
     uint8_t buf[64];
     const uint8_t *payload = (const uint8_t*)"test";
@@ -870,10 +846,8 @@ static void test_parse_frame_null_guards(void)
 
     /* Build a valid frame first */
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.channel_id = 1;
-    hdr.data_len   = 5;
+    hdr.payload_len = 5;
     ssize_t frame_len = myproto_build_frame(buf, sizeof(buf), &hdr,
                                             (const uint8_t*)"hello", 5, 0);
     if (frame_len < 0) {
@@ -912,17 +886,13 @@ static void test_proto_constants(void)
 {
     TEST("Protocol constants");
 
-    /* Verify static_assert for header size works */
-    if (sizeof(myproto_hdr_t) != 8) {
-        FAIL("myproto_hdr_t should be 8 bytes");
+    /* Verify header size is 9 bytes */
+    if (sizeof(myproto_hdr_t) != 9) {
+        FAIL("myproto_hdr_t should be 9 bytes");
         return;
     }
-    if (MYPROTO_HDR_SIZE != 8) {
-        FAIL("MYPROTO_HDR_SIZE should be 8");
-        return;
-    }
-    if (MYPROTO_MAGIC != 0x4D50) {
-        FAIL("MYPROTO_MAGIC should be 0x4D50");
+    if (MYPROTO_HDR_SIZE != 9) {
+        FAIL("MYPROTO_HDR_SIZE should be 9");
         return;
     }
 
@@ -952,9 +922,7 @@ static void test_encrypt_non_crypto_frame_processed(void)
     memset(&hdr, 0, sizeof(hdr));
     hdr.flags = MPF_DATA;
     hdr.channel_id = 1;
-    hdr.data_len = 10;
-    hdr.magic = MYPROTO_MAGIC;
-    hdr.version = MYPROTO_VERSION;
+    hdr.payload_len = 10;
 
     uint8_t data[32];
     memset(data, 'X', 10);
@@ -1053,8 +1021,8 @@ int main(void)
     /* Test 4: Frame boundary validation */
     printf("\n[Test 4] Frame Boundary Validation\n");
     test_validate_hdr_valid();
-    test_validate_hdr_bad_magic();
-    test_validate_hdr_bad_version();
+    test_validate_hdr_bad_channel_id();
+    test_validate_hdr_heartbeat_channel_id();
     test_validate_hdr_oversize_data();
     test_validate_hdr_null();
 

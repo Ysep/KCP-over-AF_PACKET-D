@@ -171,7 +171,7 @@ static int init_test_ctx(global_ctx_t *ctx)
     ctx->config.channels[0].remote_port  = 9090;
     ctx->config.channels[0].is_tcp       = 1;
     ctx->config.channels[0].enabled      = 1;
-    ctx->config.channels[0].max_sessions = 0;
+    ctx->config.channels[0].max_sessions = 256;
     strncpy(ctx->config.channels[0].listen_addr, "0.0.0.0", MAX_LISTEN_ADDR - 1);
     strncpy(ctx->config.channels[0].remote_addr, "10.0.0.1", MAX_REMOTE_ADDR - 1);
 
@@ -181,7 +181,7 @@ static int init_test_ctx(global_ctx_t *ctx)
     ctx->config.channels[1].remote_port  = 9091;
     ctx->config.channels[1].is_tcp       = 1;
     ctx->config.channels[1].enabled      = 1;
-    ctx->config.channels[1].max_sessions = 0;
+    ctx->config.channels[1].max_sessions = 256;
     strncpy(ctx->config.channels[1].listen_addr, "0.0.0.0", MAX_LISTEN_ADDR - 1);
     strncpy(ctx->config.channels[1].remote_addr, "10.0.0.2", MAX_REMOTE_ADDR - 1);
 
@@ -191,7 +191,13 @@ static int init_test_ctx(global_ctx_t *ctx)
         return -1;
     }
 
-    ctx->next_dynamic_channel_id = 257;
+    /* Set up listener_base/next ranges for dynamic channel ID allocation */
+    for (int i = 0; i < ctx->config.channel_count; i++) {
+        uint32_t limit = ctx->config.channels[i].max_sessions;
+        if (limit == 0) limit = 1;
+        ctx->listener_base[i] = 65536 + (uint32_t)i * 256;
+        ctx->listener_next[i] = ctx->listener_base[i];
+    }
 
     return 0;
 }
@@ -241,7 +247,13 @@ static int init_test_ctx_with_config(global_ctx_t *ctx,
         return -1;
     }
 
-    ctx->next_dynamic_channel_id = 257;
+    /* Set up listener_base/next ranges for dynamic channel ID allocation */
+    for (int i = 0; i < ctx->config.channel_count; i++) {
+        uint32_t limit = ctx->config.channels[i].max_sessions;
+        if (limit == 0) limit = 1;
+        ctx->listener_base[i] = 65536 + (uint32_t)i * 256;
+        ctx->listener_next[i] = ctx->listener_base[i];
+    }
 
     return 0;
 }
@@ -257,8 +269,8 @@ static void test_alloc_channel_id_basic(void)
 {
     TEST("alloc_channel_id basic sequential (listener 0)");
 
-    global_ctx_t ctx;
-    uint16_t id1, id2, id3;
+    static global_ctx_t ctx;
+    uint32_t id1, id2, id3;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
 
@@ -266,9 +278,9 @@ static void test_alloc_channel_id_basic(void)
     id2 = alloc_channel_id(&ctx, 0);
     id3 = alloc_channel_id(&ctx, 0);
 
-    CHECK(id1 == 257, "first ID should be 257");
-    CHECK(id2 == 258, "second ID should be 258");
-    CHECK(id3 == 259, "third ID should be 259");
+    CHECK(id1 == 65536, "first ID should be 65536");
+    CHECK(id2 == 65537, "second ID should be 65537");
+    CHECK(id3 == 65538, "third ID should be 65538");
 
     channel_shutdown(&ctx);
     PASS();
@@ -285,8 +297,8 @@ static void test_alloc_channel_id_wraparound(void)
 {
     TEST("alloc_channel_id wraparound / exhaustion");
 
-    global_ctx_t ctx;
-    uint16_t id;
+    static global_ctx_t ctx;
+    uint32_t id;
     channel_t *ch;
     int i;
 
@@ -294,12 +306,12 @@ static void test_alloc_channel_id_wraparound(void)
     /* We need max_channels large enough to hold 256 dynamic channels */
     ctx.config.max_channels = 512;
 
-    /* Consume all 256 IDs in [257, 512] by creating LISTENER channels */
+    /* Consume all 256 IDs in [65536, 65791] by creating LISTENER channels */
     for (i = 0; i < 256; i++) {
         id = alloc_channel_id(&ctx, 0);
         CHECK(id != 0, "alloc_channel_id returned 0 too early");
-        CHECK(id >= 257 && id <= 512,
-              "allocated ID outside [257,512] range");
+        CHECK(id >= 65536 && id <= 65791,
+              "allocated ID outside [65536,65791] range");
 
         ch = channel_create(&ctx, id, CHANNEL_ROLE_LISTENER,
                             8080, 9090, "0.0.0.0", "10.0.0.1", 1);
@@ -325,19 +337,19 @@ static void test_alloc_channel_id_multi_listener(void)
 {
     TEST("alloc_channel_id multi-listener non-overlapping ranges");
 
-    global_ctx_t ctx;
-    uint16_t id0, id1;
+    static global_ctx_t ctx;
+    uint32_t id0, id1;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
 
     id0 = alloc_channel_id(&ctx, 0);
     id1 = alloc_channel_id(&ctx, 1);
 
-    /* listener 0: [257, 512], listener 1: [513, 768] */
-    CHECK(id0 >= 257 && id0 <= 512,
-          "listener 0 ID not in [257,512]");
-    CHECK(id1 >= 513 && id1 <= 768,
-          "listener 1 ID not in [513,768]");
+    /* listener 0: [65536, 65791], listener 1: [65792, 66047] */
+    CHECK(id0 >= 65536 && id0 <= 65791,
+          "listener 0 ID not in [65536,65791]");
+    CHECK(id1 >= 65792 && id1 <= 66047,
+          "listener 1 ID not in [65792,66047]");
     CHECK(id0 != id1, "IDs from different listeners must not overlap");
 
     channel_shutdown(&ctx);
@@ -355,8 +367,8 @@ static void test_alloc_channel_id_create_find_destroy(void)
 {
     TEST("alloc_channel_id → create → find → destroy");
 
-    global_ctx_t ctx;
-    uint16_t ids[5];
+    static global_ctx_t ctx;
+    uint32_t ids[5];
     channel_t *ch;
     int i;
 
@@ -366,8 +378,8 @@ static void test_alloc_channel_id_create_find_destroy(void)
     for (i = 0; i < 5; i++) {
         ids[i] = alloc_channel_id(&ctx, 0);
         CHECK(ids[i] != 0, "alloc_channel_id returned 0");
-        CHECK(ids[i] >= 257 && ids[i] <= 512,
-              "ID outside [257,512] range");
+        CHECK(ids[i] >= 65536 && ids[i] <= 65791,
+              "ID outside [65536,65791] range");
 
         ch = channel_create(&ctx, ids[i], CHANNEL_ROLE_LISTENER,
                             8080, 9090, "0.0.0.0", "10.0.0.1", 1);
@@ -401,7 +413,7 @@ static void test_listener_destroy_guards_listen_fd(void)
 {
     TEST("listener destroy guards listen_fd (STATIC_LISTENER)");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
@@ -434,7 +446,7 @@ static void test_timeout_check_skips_listener(void)
 {
     TEST("timeout_check skips STATIC_LISTENER channels");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
@@ -467,7 +479,7 @@ static void test_data_channel_destroy_normal(void)
 {
     TEST("data channel destroy (no STATIC_LISTENER flag)");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
@@ -505,7 +517,7 @@ static void test_proxy_accept_is_tcp_filter(void)
 {
     TEST("proxy_accept rejects non-TCP channel");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     int ret;
 
@@ -536,7 +548,7 @@ static void test_proxy_accept_invalid_listen_fd(void)
 {
     TEST("proxy_accept rejects invalid listen_fd");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     int ret;
 
@@ -587,7 +599,7 @@ static void test_proxy_accept_multi_session_flow(void)
 {
     TEST("proxy_accept multi-session conditions check");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
@@ -627,7 +639,7 @@ static void test_proxy_accept_single_session_guard(void)
 {
     TEST("proxy_accept single-session guard");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
@@ -661,16 +673,16 @@ cleanup:
  * ============================================================================ */
 
 /*
- * Test 13: Responder target mapping for channel_id 257 → index 0.
+ * Test 13: Responder target mapping for channel_id 65536 → index 0.
  */
-static void test_responder_target_mapping_257(void)
+static void test_responder_target_mapping_65536(void)
 {
-    TEST("responder target mapping: id=257 → config index 0");
+    TEST("responder target mapping: id=65536 → config index 0");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_config_t configs[2];
-    uint16_t channel_id = 257;
-    uint16_t base_idx;
+    uint32_t channel_id = 65536;
+    int base_idx = -1;
 
     memset(&configs, 0, sizeof(configs));
     configs[0].channel_id  = 1;
@@ -678,6 +690,7 @@ static void test_responder_target_mapping_257(void)
     configs[0].remote_port = 9090;
     configs[0].is_tcp      = 1;
     configs[0].enabled     = 1;
+    configs[0].max_sessions = 256;
     strncpy(configs[0].listen_addr, "0.0.0.0", MAX_LISTEN_ADDR - 1);
     strncpy(configs[0].remote_addr, "10.0.0.1", MAX_REMOTE_ADDR - 1);
 
@@ -686,16 +699,23 @@ static void test_responder_target_mapping_257(void)
     configs[1].remote_port = 9091;
     configs[1].is_tcp      = 1;
     configs[1].enabled     = 1;
+    configs[1].max_sessions = 256;
     strncpy(configs[1].listen_addr, "0.0.0.0", MAX_LISTEN_ADDR - 1);
     strncpy(configs[1].remote_addr, "10.0.0.2", MAX_REMOTE_ADDR - 1);
 
     CHECK(init_test_ctx_with_config(&ctx, configs, 2) == 0,
           "init_test_ctx_with_config failed");
 
-    base_idx = (uint16_t)((channel_id - 257) / 256);
-    CHECK(base_idx == 0, "(257-257)/256 should be 0");
+    /* Search listener_base ranges (from highest index down) to find config */
+    for (int idx = ctx.config.channel_count - 1; idx >= 0; idx--) {
+        if (channel_id >= ctx.listener_base[idx]) {
+            base_idx = idx;
+            break;
+        }
+    }
+    CHECK(base_idx == 0, "channel_id 65536 should map to config index 0");
 
-    CHECK(base_idx < (uint16_t)ctx.config.channel_count,
+    CHECK(base_idx < ctx.config.channel_count,
           "index must be within channel_count");
     CHECK(ctx.config.channels[base_idx].remote_port == 9090,
           "channels[0].remote_port should be 9090");
@@ -709,16 +729,16 @@ cleanup:
 }
 
 /*
- * Test 14: Responder target mapping for channel_id 513 → index 1.
+ * Test 14: Responder target mapping for channel_id 65792 → index 1.
  */
-static void test_responder_target_mapping_513(void)
+static void test_responder_target_mapping_65792(void)
 {
-    TEST("responder target mapping: id=513 → config index 1");
+    TEST("responder target mapping: id=65792 → config index 1");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_config_t configs[2];
-    uint16_t channel_id = 513;
-    uint16_t base_idx;
+    uint32_t channel_id = 65792;
+    int base_idx = -1;
 
     memset(&configs, 0, sizeof(configs));
     configs[0].channel_id  = 1;
@@ -726,6 +746,7 @@ static void test_responder_target_mapping_513(void)
     configs[0].remote_port = 9090;
     configs[0].is_tcp      = 1;
     configs[0].enabled     = 1;
+    configs[0].max_sessions = 256;
     strncpy(configs[0].listen_addr, "0.0.0.0", MAX_LISTEN_ADDR - 1);
     strncpy(configs[0].remote_addr, "10.0.0.1", MAX_REMOTE_ADDR - 1);
 
@@ -734,16 +755,23 @@ static void test_responder_target_mapping_513(void)
     configs[1].remote_port = 9091;
     configs[1].is_tcp      = 1;
     configs[1].enabled     = 1;
+    configs[1].max_sessions = 256;
     strncpy(configs[1].listen_addr, "0.0.0.0", MAX_LISTEN_ADDR - 1);
     strncpy(configs[1].remote_addr, "10.0.0.2", MAX_REMOTE_ADDR - 1);
 
     CHECK(init_test_ctx_with_config(&ctx, configs, 2) == 0,
           "init_test_ctx_with_config failed");
 
-    base_idx = (uint16_t)((channel_id - 257) / 256);
-    CHECK(base_idx == 1, "(513-257)/256 should be 1");
+    /* Search listener_base ranges (from highest index down) to find config */
+    for (int idx = ctx.config.channel_count - 1; idx >= 0; idx--) {
+        if (channel_id >= ctx.listener_base[idx]) {
+            base_idx = idx;
+            break;
+        }
+    }
+    CHECK(base_idx == 1, "channel_id 65792 should map to config index 1");
 
-    CHECK(base_idx < (uint16_t)ctx.config.channel_count,
+    CHECK(base_idx < ctx.config.channel_count,
           "index must be within channel_count");
     CHECK(ctx.config.channels[base_idx].remote_port == 9091,
           "channels[1].remote_port should be 9091");
@@ -763,18 +791,22 @@ static void test_responder_out_of_range(void)
 {
     TEST("responder target mapping: out-of-range channel_id");
 
-    global_ctx_t ctx;
-    uint16_t channel_id = 1000;
-    uint16_t base_idx;
+    static global_ctx_t ctx;
+    uint32_t channel_id = 5000;
+    int base_idx = -1;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
-    /* channel_count == 2 */
+    /* channel_count == 2, listener_base[0]=65536, listener_base[1]=65792 */
 
-    base_idx = (uint16_t)((channel_id - 257) / 256);
-    /* (1000 - 257) / 256 = 743 / 256 = 2 */
-
-    CHECK(base_idx >= (uint16_t)ctx.config.channel_count,
-          "index should be out of bounds (>= 2)");
+    /* Search listener_base ranges — channel_id 5000 is below all bases */
+    for (int idx = ctx.config.channel_count - 1; idx >= 0; idx--) {
+        if (channel_id >= ctx.listener_base[idx]) {
+            base_idx = idx;
+            break;
+        }
+    }
+    CHECK(base_idx == -1,
+          "index should remain -1 (no matching listener base)");
 
     channel_shutdown(&ctx);
     PASS();
@@ -795,7 +827,7 @@ static void test_syn_on_established_ignored(void)
 {
     TEST("SYN on ESTABLISHED channel is ignored");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t hdr;
     int ret;
@@ -810,11 +842,9 @@ static void test_syn_on_established_ignored(void)
 
     /* Build a SYN frame for this channel */
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_SYN;
     hdr.channel_id = 100;
-    hdr.data_len   = 0;
+    hdr.payload_len = 0;
 
     /* Validate the header we just built */
     ret = myproto_validate_hdr(&hdr);
@@ -846,7 +876,7 @@ static void test_syn_creates_responder_channel(void)
 {
     TEST("SYN for unknown ID creates RESPONDER channel");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t hdr;
     int ret;
@@ -855,11 +885,9 @@ static void test_syn_creates_responder_channel(void)
 
     /* Build a SYN frame for an unknown channel_id */
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_SYN;
     hdr.channel_id = 50;
-    hdr.data_len   = 0;
+    hdr.payload_len = 0;
 
     ret = myproto_validate_hdr(&hdr);
     CHECK(ret == 0, "myproto_validate_hdr failed");
@@ -891,7 +919,7 @@ static void test_rst_destroys_channel(void)
 {
     TEST("RST frame destroys channel");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t hdr;
     int ret;
@@ -906,11 +934,9 @@ static void test_rst_destroys_channel(void)
 
     /* Build RST frame */
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_RST;
     hdr.channel_id = 200;
-    hdr.data_len   = 0;
+    hdr.payload_len = 0;
 
     ret = myproto_validate_hdr(&hdr);
     CHECK(ret == 0, "myproto_validate_hdr failed for RST frame");
@@ -942,7 +968,7 @@ static void test_listener_role_no_syn(void)
 {
     TEST("LISTENER role does not send SYN");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
@@ -971,7 +997,7 @@ static void test_initiator_role_sends_syn(void)
 {
     TEST("INITIATOR role sends SYN → SYN_SENT");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
@@ -1024,8 +1050,8 @@ int main(void)
 
     /* ---- RESPONDER Mapping Tests ---- */
     print_banner("Section 4: RESPONDER Mapping Tests");
-    test_responder_target_mapping_257();
-    test_responder_target_mapping_513();
+    test_responder_target_mapping_65536();
+    test_responder_target_mapping_65792();
     test_responder_out_of_range();
 
     /* ---- SYN Handler Tests ---- */

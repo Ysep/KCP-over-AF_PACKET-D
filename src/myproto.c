@@ -11,12 +11,12 @@
  * ║   │ dst_mac(6) │ src_mac(6) │ EtherType(2)          │                    ║
  * ║   └─────────────────────────────────────────────────┘                    ║
  * ║                                                                          ║
- * ║   ┌─ MyProto 协议头（8 字节，本模块处理） ─────────────────┐            ║
- * ║   │ magic(2)  │ version(1) │ flags(1) │ channel_id(2) │ data_len(2) │    ║
- * ║   │ 0x4D50    │    0x01    │ 见标志位 │  通道标识符    │ 负载长度     │    ║
+ * ║   ┌─ MyProto 协议头（9 字节，本模块处理） ────────────────────────┐        ║
+ * ║   │ channel_id(4) │ flags(1) │ payload_len(2) │ header_crc(2)    │        ║
+ * ║   │  通道标识符    │ 标志位   │ 负载长度       │ 头部 CRC         │        ║
  * ║   └────────────────────────────────────────────────────────────────┘    ║
  * ║                                                                          ║
- * ║   ┌─ 负载区域（变长，data_len 字节） ──────────────────────────┐        ║
+ * ║   ┌─ 负载区域（变长，payload_len 字节） ────────────────────────┐        ║
  * ║   │                                                             │        ║
  * ║   │  【明文模式】: raw_data                                     │        ║
  * ║   │  【加密模式】: IV(16B) ∥ SM4-CBC密文(N×16B) ∥ SM3-HMAC(32B)│        ║
@@ -28,9 +28,9 @@
  * ║   └────────────────────────────────────┘                                 ║
  * ║                                                                          ║
  * ║   【完整帧结构总结】                                                      ║
- * ║   Eth(14) + MyProtoHdr(8) + Payload(N) + [CRC32(4)]                      ║
- * ║   最小帧: 14 + 8 = 22 字节                                               ║
- * ║   最大帧: 14 + 8 + 1500 + 4 = 1526 字节                                  ║
+ * ║   Eth(14) + MyProtoHdr(9) + Payload(N) + [CRC32(4)]                      ║
+ * ║   最小帧: 14 + 9 = 23 字节                                               ║
+ * ║   最大帧: 14 + 9 + 1500 + 4 = 1527 字节                                  ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 
@@ -122,10 +122,8 @@ uint32_t myproto_crc32(const uint8_t *data, size_t len)
  * myproto_validate_hdr - 验证 MyProto 帧头合法性。
  *
  * 检查项：
- *   - 魔数必须为 MYPROTO_MAGIC (0x4D50)
- *   - 版本号必须为 MYPROTO_VERSION (0x01)
- *   - channel_id 必须在 [0, MAX_CHANNELS) 范围内
- *   - data_len 不得超过 ETH_MAX_PAYLOAD
+ *   - channel_id 必须在 [0, MAX_CHANNELS) 或等于 HEARTBEAT_CH_ID
+ *   - payload_len 不得超过 ETH_MAX_PAYLOAD
  */
 int myproto_validate_hdr(const myproto_hdr_t *hdr)
 {
@@ -134,27 +132,15 @@ int myproto_validate_hdr(const myproto_hdr_t *hdr)
         return -1;
     }
 
-    if (hdr->magic != MYPROTO_MAGIC) {
-        LOG_ERROR("myproto_validate_hdr: invalid magic 0x%04X (expected 0x%04X)",
-                  hdr->magic, MYPROTO_MAGIC);
-        return -1;
-    }
-
-    if (hdr->version != MYPROTO_VERSION) {
-        LOG_ERROR("myproto_validate_hdr: unsupported version %u (expected %u)",
-                  hdr->version, MYPROTO_VERSION);
-        return -1;
-    }
-
     if (hdr->channel_id >= MAX_CHANNELS && hdr->channel_id != HEARTBEAT_CH_ID) {
         LOG_ERROR("myproto_validate_hdr: channel_id %u exceeds MAX_CHANNELS (%u)",
-                  hdr->channel_id, MAX_CHANNELS);
+                  (unsigned int)hdr->channel_id, MAX_CHANNELS);
         return -1;
     }
 
-    if (hdr->data_len > ETH_MAX_PAYLOAD) {
-        LOG_ERROR("myproto_validate_hdr: data_len %u exceeds ETH_MAX_PAYLOAD (%u)",
-                  hdr->data_len, ETH_MAX_PAYLOAD);
+    if (hdr->payload_len > ETH_MAX_PAYLOAD) {
+        LOG_ERROR("myproto_validate_hdr: payload_len %u exceeds ETH_MAX_PAYLOAD (%u)",
+                  hdr->payload_len, ETH_MAX_PAYLOAD);
         return -1;
     }
 
@@ -165,11 +151,13 @@ int myproto_validate_hdr(const myproto_hdr_t *hdr)
  * myproto_build_frame - 构造完整的 MyProto 帧。
  *
  * 缓冲区布局（MyProto 层视角，不含以太网头）：
- *   [0..MYPROTO_HDR_SIZE-1]        MyProto 协议头
- *   [MYPROTO_HDR_SIZE..]          负载数据
- *   [如果 crc_enabled]            CRC32（4 字节小端序）
+ *   [0..3]                         channel_id（4 字节，大端序）
+ *   [4]                            flags（1 字节）
+ *   [5..6]                         payload_len（2 字节，大端序）
+ *   [7..8]                         header_crc（2 字节）
+ *   [9..]                          负载数据
+ *   [如果 crc_enabled]             CRC32（4 字节小端序）
  *
- * 所有多字节字段以网络字节序写入。
  * 成功返回实际帧长度（含 CRC），失败返回 -1。
  */
 ssize_t myproto_build_frame(uint8_t *buf, size_t buf_size,
@@ -178,7 +166,6 @@ ssize_t myproto_build_frame(uint8_t *buf, size_t buf_size,
                             int crc_enabled)
 {
     size_t total_len;
-    uint8_t *hdr_pos;
 
     if (!buf) {
         LOG_ERROR("myproto_build_frame: null buffer");
@@ -202,18 +189,16 @@ ssize_t myproto_build_frame(uint8_t *buf, size_t buf_size,
 
     total_len = MYPROTO_HDR_SIZE + payload_len;
 
-    /* 写入 MyProto 协议头（网络字节序） */
+    /* 写入 MyProto 协议头（大端序） */
     {
-        uint16_t net_magic     = htons(hdr->magic);
-        uint16_t net_channel   = htons(hdr->channel_id);
-        uint16_t net_data_len  = htons(hdr->data_len);
+        uint32_t net_channel  = htonl(hdr->channel_id);
+        uint16_t net_payload  = htons(hdr->payload_len);
+        uint16_t header_crc   = 0;  /* Reserved for future use */
 
-        hdr_pos = buf;
-        memcpy(hdr_pos,     &net_magic,    2);
-        hdr_pos[2] = hdr->version;
-        hdr_pos[3] = hdr->flags;
-        memcpy(hdr_pos + 4, &net_channel,  2);
-        memcpy(hdr_pos + 6, &net_data_len, 2);
+        memcpy(buf,     &net_channel,  4);
+        buf[4] = hdr->flags;
+        memcpy(buf + 5, &net_payload,  2);
+        memcpy(buf + 7, &header_crc,   2);
     }
 
     /* 复制负载数据（若 payload 已位于 buf+MYPROTO_HDR_SIZE 则跳过，
@@ -245,8 +230,6 @@ int myproto_parse_frame(const uint8_t *data, size_t data_len,
                         myproto_hdr_t *hdr,
                         const uint8_t **payload, size_t *payload_len)
 {
-    const uint8_t *hdr_pos;
-
     if (!data) {
         LOG_ERROR("myproto_parse_frame: null data pointer");
         return -1;
@@ -270,20 +253,19 @@ int myproto_parse_frame(const uint8_t *data, size_t data_len,
         return -1;
     }
 
-    /* 从以太网头之后读取 MyProto 协议头（网络字节序） */
+    /* 从以太网头之后读取 MyProto 协议头（大端序） */
     {
-        uint16_t net_magic, net_channel, net_data_len;
+        uint32_t net_channel;
+        uint16_t net_payload;
 
-        hdr_pos = data;
-        memcpy(&net_magic,    hdr_pos,     2);
-        hdr->version    = hdr_pos[2];
-        hdr->flags      = hdr_pos[3];
-        memcpy(&net_channel,  hdr_pos + 4, 2);
-        memcpy(&net_data_len, hdr_pos + 6, 2);
+        memcpy(&net_channel, data,     4);
+        hdr->flags       = data[4];
+        memcpy(&net_payload, data + 5, 2);
+        /* bytes 7-8: header_crc (reserved, ignored on parse) */
 
-        hdr->magic      = ntohs(net_magic);
-        hdr->channel_id = ntohs(net_channel);
-        hdr->data_len   = ntohs(net_data_len);
+        hdr->channel_id  = ntohl(net_channel);
+        hdr->payload_len = ntohs(net_payload);
+        hdr->header_crc  = 0;  /* not validated on receive */
     }
 
     /* 验证协议头 */
@@ -291,19 +273,19 @@ int myproto_parse_frame(const uint8_t *data, size_t data_len,
         return -1;
     }
 
-    /* 检查 data_len 是否在可用数据范围内 */
+    /* 检查 payload_len 是否在可用数据范围内 */
     {
         size_t available = data_len - MYPROTO_MIN_FRAME_SIZE;
-        if (hdr->data_len > available) {
-            LOG_ERROR("myproto_parse_frame: declared data_len %u exceeds "
-                      "available bytes %zu", hdr->data_len, available);
+        if (hdr->payload_len > available) {
+            LOG_ERROR("myproto_parse_frame: declared payload_len %u exceeds "
+                      "available bytes %zu", hdr->payload_len, available);
             return -1;
         }
     }
 
     /* 设置输出指针 */
     *payload = data + MYPROTO_HDR_SIZE;
-    *payload_len = hdr->data_len;
+    *payload_len = hdr->payload_len;
 
     return 0;
 }
@@ -311,11 +293,11 @@ int myproto_parse_frame(const uint8_t *data, size_t data_len,
 /*
  * myproto_build_ctrl_frame - 构造控制帧。
  *
- * 控制帧没有负载数据（data_len=0），仅包含协议头。
+ * 控制帧没有负载数据（payload_len=0），仅包含协议头。
  * 控制帧不附加 CRC（crc_enabled 参数仅用于接口一致性，内部恒传 0）。
  */
 ssize_t myproto_build_ctrl_frame(uint8_t *buf, size_t buf_size,
-                                 uint16_t channel_id, uint8_t flags,
+                                 uint32_t channel_id, uint8_t flags,
                                  int crc_enabled)
 {
     myproto_hdr_t hdr;
@@ -333,7 +315,7 @@ ssize_t myproto_build_ctrl_frame(uint8_t *buf, size_t buf_size,
 
     if (channel_id >= MAX_CHANNELS && channel_id != HEARTBEAT_CH_ID) {
         LOG_ERROR("myproto_build_ctrl_frame: invalid channel_id %u "
-                  "(max %u)", channel_id, MAX_CHANNELS);
+                  "(max %u)", (unsigned int)channel_id, MAX_CHANNELS);
         return -1;
     }
 
@@ -347,11 +329,9 @@ ssize_t myproto_build_ctrl_frame(uint8_t *buf, size_t buf_size,
     }
 
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
-    hdr.flags      = flags;
-    hdr.channel_id = channel_id;
-    hdr.data_len   = 0;
+    hdr.channel_id  = channel_id;
+    hdr.flags       = flags;
+    hdr.payload_len = 0;
 
     return myproto_build_frame(buf, buf_size, &hdr, NULL, 0, 0);
 }
@@ -365,7 +345,7 @@ ssize_t myproto_build_ctrl_frame(uint8_t *buf, size_t buf_size,
  * 加密由 crypto 模块 (SM4-CBC + SM3-HMAC via Nettle) 处理。
  */
 ssize_t myproto_build_data_frame(uint8_t *buf, size_t buf_size,
-                                 uint16_t channel_id, uint8_t flags,
+                                 uint32_t channel_id, uint8_t flags,
                                  const uint8_t *data, size_t data_len,
                                  int crc_enabled)
 {
@@ -385,7 +365,7 @@ ssize_t myproto_build_data_frame(uint8_t *buf, size_t buf_size,
 
     if (channel_id >= MAX_CHANNELS && channel_id != HEARTBEAT_CH_ID) {
         LOG_ERROR("myproto_build_data_frame: invalid channel_id %u "
-                  "(max %u)", channel_id, MAX_CHANNELS);
+                  "(max %u)", (unsigned int)channel_id, MAX_CHANNELS);
         return -1;
     }
 
@@ -429,11 +409,9 @@ ssize_t myproto_build_data_frame(uint8_t *buf, size_t buf_size,
 
     /* 构建协议头 */
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
-    hdr.flags      = flags;
-    hdr.channel_id = channel_id;
-    hdr.data_len   = (uint16_t)wire_payload_len;
+    hdr.channel_id  = channel_id;
+    hdr.flags       = flags;
+    hdr.payload_len = (uint16_t)wire_payload_len;
 
     /*
      * 加密路径下，加密数据已由 crypto_encrypt_frame 写入 buf+MYPROTO_HDR_SIZE；

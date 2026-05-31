@@ -194,7 +194,7 @@ static void test_config_load_valid(void)
         return;
     }
 
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     int ret = config_load(tmp_path, &cfg);
 
@@ -273,7 +273,7 @@ static void test_config_with_defaults(void)
         return;
     }
 
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     int ret = config_load(tmp_path, &cfg);
 
@@ -288,7 +288,7 @@ static void test_config_with_defaults(void)
           "default kcp_recv_window mismatch");
     CHECK(cfg.node_type == NODE_TYPE_FRONTEND,
           "default node_type mismatch");
-    CHECK(cfg.max_channels == 4096,
+    CHECK(cfg.max_channels == MAX_CHANNELS,
           "default max_channels mismatch");
     CHECK(cfg.crc_enabled == 0,
           "default crc_enabled should be 0");
@@ -328,7 +328,7 @@ static void test_config_load_reverse_node_type(void)
         return;
     }
 
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     int ret = config_load(tmp_path, &cfg);
 
@@ -348,7 +348,7 @@ static void test_config_load_nonexistent_file(void)
 {
     TEST("config_load: 不存在的文件");
 
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     int ret = config_load("/tmp/nonexistent_config_xyz123.json", &cfg);
 
@@ -591,7 +591,7 @@ static void test_channel_hash_operations(void)
 {
     TEST("Channel 哈希表操作 (init→create→find→destroy→cleanup)");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     init_minimal_ctx(&ctx);
 
     int ret = channel_init(&ctx, 256);
@@ -671,7 +671,7 @@ static void test_channel_hash_collision_handling(void)
 {
     TEST("Channel 哈希表冲突链与唯一性检查");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     init_minimal_ctx(&ctx);
 
     int ret = channel_init(&ctx, 256);
@@ -752,7 +752,7 @@ static void test_control_frame_types(void)
                  ctrl_frames[i].name, ctrl_frames[i].flag, hdr.flags);
         CHECK(hdr.flags == ctrl_frames[i].flag, err);
 
-        CHECK(hdr.data_len == 0, "control frame data_len should be 0");
+        CHECK(hdr.payload_len == 0, "control frame payload_len should be 0");
         CHECK(myproto_is_ctrl_frame(hdr.flags) == 1, "should be ctrl frame");
         CHECK(myproto_is_data_frame(hdr.flags) == 0, "should not be data frame");
     }
@@ -768,7 +768,7 @@ static void test_syn_frame_routing(void)
 {
     TEST("SYN 帧路由: channel_process_frame 创建响应方通道");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     init_minimal_ctx(&ctx);
 
     /* 配置通道以便 SYN 处理时查找配置 */
@@ -841,11 +841,9 @@ static void test_data_frame_build_and_parse(void)
     /* 构建带 CRC 的数据帧 */
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = MPF_DATA;
     hdr.channel_id = 51;
-    hdr.data_len   = (uint16_t)data_len;
+    hdr.payload_len = (uint16_t)data_len;
 
     uint8_t buf[MAX_FRAME_SIZE];
     ssize_t frame_len = myproto_build_frame(buf, sizeof(buf),
@@ -897,7 +895,7 @@ cleanup:
 static void test_config_validation_missing_interface(void)
 {
     TEST("validate_config: 缺少 interface 字段");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     int ret = validate_config(&cfg);
     CHECK(ret == -1, "should fail: empty interface");
@@ -908,7 +906,7 @@ cleanup: ;
 static void test_config_validation_bad_ethertype(void)
 {
     TEST("validate_config: 无效 ethertype (保留范围 0x0100)");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype = 0x0100;
@@ -921,7 +919,7 @@ cleanup: ;
 static void test_config_validation_ethertype_boundary(void)
 {
     TEST("validate_config: ethertype 边界值 (0x0600 应通过)");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = 0x0600;
@@ -944,7 +942,7 @@ cleanup: ;
 static void test_config_validation_duplicate_channel_ids(void)
 {
     TEST("validate_config: 重复 channel_id");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -968,7 +966,7 @@ cleanup: ;
 static void test_config_validation_channel_id_zero(void)
 {
     TEST("validate_config: channel_id 为 0");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -989,7 +987,7 @@ cleanup: ;
 static void test_config_validation_port_zero(void)
 {
     TEST("validate_config: listen_port 为 0");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -1010,7 +1008,7 @@ cleanup: ;
 static void test_config_validation_remote_port_zero(void)
 {
     TEST("validate_config: remote_port 为 0");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -1031,7 +1029,7 @@ cleanup: ;
 static void test_config_validation_no_channels(void)
 {
     TEST("validate_config: 无通道配置");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype       = MYPROTO_ETHERTYPE;
@@ -1049,7 +1047,7 @@ cleanup: ;
 static void test_config_validation_negative_kcp_params(void)
 {
     TEST("validate_config: 负值 kcp_mtu");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -1070,7 +1068,7 @@ cleanup: ;
 static void test_config_validation_zero_send_window(void)
 {
     TEST("validate_config: kcp_send_window 为 0");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -1091,7 +1089,7 @@ cleanup: ;
 static void test_config_validation_max_channels_out_of_range(void)
 {
     TEST("validate_config: max_channels 超出范围 (0)");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -1132,7 +1130,7 @@ static void test_config_validation_invalid_mac_format(void)
         return;
     }
 
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     int ret = config_load(tmp_path, &cfg);
     CHECK(ret == -1, "config_load should fail on invalid MAC");
@@ -1145,7 +1143,7 @@ cleanup:
 static void test_config_validation_crypto_enabled_no_key(void)
 {
     TEST("validate_config: 启用加密但无密钥");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;
@@ -1170,7 +1168,7 @@ cleanup: ;
 static void test_config_validation_crypto_valid_key(void)
 {
     TEST("validate_config: 加密已启用且有有效密钥（应通过）");
-    global_config_t cfg;
+    static global_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
     strncpy(cfg.interface, "eth0", MAX_INTERFACE_NAME - 1);
     cfg.ethertype          = MYPROTO_ETHERTYPE;

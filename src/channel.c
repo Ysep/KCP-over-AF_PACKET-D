@@ -88,7 +88,7 @@ static global_ctx_t *g_ctx = NULL;
 /*
  * 哈希函数：将 channel_id 映射到哈希表槽位
  */
-static inline unsigned int channel_hash(uint16_t channel_id)
+static inline unsigned int channel_hash(uint32_t channel_id)
 {
     if (!g_ctx) return 0;
     return channel_id % g_ctx->channel_hash_size;
@@ -98,7 +98,7 @@ static inline unsigned int channel_hash(uint16_t channel_id)
  * 在全局配置中查找与 channel_id 匹配的通道配置。
  * 返回匹配的 channel_config_t 指针，未找到返回 NULL。
  */
-static const channel_config_t *channel_lookup_config(uint16_t channel_id)
+static const channel_config_t *channel_lookup_config(uint32_t channel_id)
 {
     int i;
 
@@ -327,9 +327,6 @@ int channel_init(global_ctx_t *ctx, int max_channels)
     }
     ctx->channel_hash_size = hash_size;
 
-    /* 初始化动态通道 ID 分配器 */
-    ctx->next_dynamic_channel_id = 257;
-
     /* 重置通道计数 */
     ctx->channel_count = 0;
 
@@ -382,21 +379,27 @@ void channel_shutdown(global_ctx_t *ctx)
 /*
  * 分配动态数据通道 ID。
  * listener_idx: listener 在 g_ctx->config.channels[] 中的 array index。
- * 每个 listener 独占 [257+idx*256, 512+idx*256) 共 256 个 ID。
+ * 每个 listener 从 listener_base[idx] 开始，范围由 max_sessions 决定。
  */
-uint16_t alloc_channel_id(global_ctx_t *ctx, int listener_idx)
+#define DYNAMIC_CHANNEL_BASE 65536U
+
+uint32_t alloc_channel_id(global_ctx_t *ctx, int listener_idx)
 {
-    uint16_t base = (uint16_t)(257 + (uint32_t)listener_idx * 256);
-    uint16_t max  = (uint16_t)(base + 255);
+    if (listener_idx < 0 || listener_idx >= ctx->config.channel_count)
+        return 0;
 
-    if (ctx->next_dynamic_channel_id < base ||
-        ctx->next_dynamic_channel_id > max) {
-        ctx->next_dynamic_channel_id = base;
-    }
+    uint32_t limit = (uint32_t)ctx->config.channels[listener_idx].max_sessions;
+    if (limit == 0) limit = 1;
 
-    for (int attempt = 0; attempt < 256; attempt++) {
-        uint16_t id = ctx->next_dynamic_channel_id++;
-        if (id > max) ctx->next_dynamic_channel_id = base;
+    uint32_t base = ctx->listener_base[listener_idx];
+    uint32_t max  = base + limit - 1;
+
+    for (uint32_t attempt = 0; attempt < limit; attempt++) {
+        uint32_t id = ctx->listener_next[listener_idx]++;
+        if (id > max) {
+            ctx->listener_next[listener_idx] = base;
+            id = ctx->listener_next[listener_idx]++;
+        }
         if (channel_find(ctx, id) == NULL) return id;
     }
     return 0;
@@ -405,7 +408,7 @@ uint16_t alloc_channel_id(global_ctx_t *ctx, int listener_idx)
 /*
  * 创建新通道
  */
-channel_t *channel_create(global_ctx_t *ctx, uint16_t channel_id,
+channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
                           channel_role_t role,
                           uint16_t listen_port, uint16_t remote_port,
                           const char *listen_addr, const char *remote_addr,
@@ -634,7 +637,7 @@ void channel_destroy(global_ctx_t *ctx, channel_t *ch)
 /*
  * 在哈希表中查找通道
  */
-channel_t *channel_find(global_ctx_t *ctx, uint16_t channel_id)
+channel_t *channel_find(global_ctx_t *ctx, uint32_t channel_id)
 {
     unsigned int idx;
     channel_t   *cur;
@@ -724,11 +727,13 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 uint8_t                 tcp   = 1;
 
                 cfg = channel_lookup_config(hdr->channel_id);
-                /* Dynamic ID fallback: if not found in config, derive from (id-257)/256 */
+                /* Dynamic ID fallback: search listener_base ranges */
                 if (!cfg) {
-                    uint16_t base_idx = (uint16_t)((hdr->channel_id - 257) / 256);
-                    if (base_idx < g_ctx->config.channel_count) {
-                        cfg = &g_ctx->config.channels[base_idx];
+                    for (int idx = g_ctx->config.channel_count - 1; idx >= 0; idx--) {
+                        if (hdr->channel_id >= g_ctx->listener_base[idx]) {
+                            cfg = &g_ctx->config.channels[idx];
+                            break;
+                        }
                     }
                 }
                 if (cfg) {

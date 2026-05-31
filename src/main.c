@@ -320,7 +320,7 @@ int config_load(const char *path, global_config_t *config)
     if (json_object_object_get_ex(root, "max_channels", &tmp)) {
         config->max_channels = json_object_get_int(tmp);
     } else {
-        config->max_channels = 4096;
+        config->max_channels = 65536;
     }
 
     /* ---- heartbeat_interval ---- */
@@ -419,7 +419,7 @@ int config_load(const char *path, global_config_t *config)
             memset(ch_cfg, 0, sizeof(*ch_cfg));
 
             if (json_object_object_get_ex(ch_obj, "channel_id", &tmp))
-                ch_cfg->channel_id = (uint16_t)json_object_get_int(tmp);
+                ch_cfg->channel_id = (uint32_t)json_object_get_int(tmp);
 
             if (json_object_object_get_ex(ch_obj, "listen_port", &tmp))
                 ch_cfg->listen_port = (uint16_t)json_object_get_int(tmp);
@@ -622,6 +622,21 @@ static int write_pid_file(const char *path)
     return 0;
 }
 
+#define DYNAMIC_CHANNEL_BASE 65536U
+
+/* ---- 构建 listener ID 池基址 ---- */
+static void build_listener_bases(global_ctx_t *ctx)
+{
+    uint32_t offset = DYNAMIC_CHANNEL_BASE;
+    for (int i = 0; i < ctx->config.channel_count; i++) {
+        uint32_t limit = (uint32_t)g_ctx->config.channels[i].max_sessions;
+        if (limit == 0) limit = 1;
+        ctx->listener_base[i] = offset;
+        ctx->listener_next[i] = offset;
+        offset += limit;
+    }
+}
+
 /* ---- 清理 ---- */
 static void cleanup(global_ctx_t *ctx)
 {
@@ -660,30 +675,30 @@ static void cleanup(global_ctx_t *ctx)
 /* ---- 配置热重载 ---- */
 static int config_reload(global_ctx_t *ctx, const char *config_path)
 {
-    global_config_t new_cfg;
-    memset(&new_cfg, 0, sizeof(new_cfg));
+    global_config_t *new_cfg = calloc(1, sizeof(global_config_t));
+    if (!new_cfg) return -1;
 
-    if (config_load(config_path, &new_cfg) != 0) {
+    if (config_load(config_path, new_cfg) != 0) {
         LOG_ERROR("Config reload: failed to load %s", config_path);
         return -1;
     }
 
-    if (validate_config(&new_cfg) != 0) {
+    if (validate_config(new_cfg) != 0) {
         LOG_ERROR("Config reload: validation failed");
         return -1;
     }
 
     /* Only update runtime-tunable params (not interface, MAC, channels) */
-    ctx->config.crc_enabled        = new_cfg.crc_enabled;
-    ctx->config.heartbeat_interval = new_cfg.heartbeat_interval;
-    ctx->config.heartbeat_timeout  = new_cfg.heartbeat_timeout;
+    ctx->config.crc_enabled        = new_cfg->crc_enabled;
+    ctx->config.heartbeat_interval = new_cfg->heartbeat_interval;
+    ctx->config.heartbeat_timeout  = new_cfg->heartbeat_timeout;
     /* Heartbeat params are read from g_ctx->config at check time (not cached per-channel) */
-    ctx->config.kcp_nodelay        = new_cfg.kcp_nodelay;
-    ctx->config.kcp_interval       = new_cfg.kcp_interval;
-    ctx->config.kcp_resend         = new_cfg.kcp_resend;
-    ctx->config.kcp_nc             = new_cfg.kcp_nc;
-    ctx->config.kcp_send_window    = new_cfg.kcp_send_window;
-    ctx->config.kcp_recv_window    = new_cfg.kcp_recv_window;
+    ctx->config.kcp_nodelay        = new_cfg->kcp_nodelay;
+    ctx->config.kcp_interval       = new_cfg->kcp_interval;
+    ctx->config.kcp_resend         = new_cfg->kcp_resend;
+    ctx->config.kcp_nc             = new_cfg->kcp_nc;
+    ctx->config.kcp_send_window    = new_cfg->kcp_send_window;
+    ctx->config.kcp_recv_window    = new_cfg->kcp_recv_window;
 
     /* Update KCP params on all existing channels */
     for (uint32_t i = 0; i < ctx->channel_hash_size; i++) {
@@ -699,10 +714,10 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     }
 
     /* Update encryption if encryption config changed */
-    if (new_cfg.encryption.enabled != ctx->config.encryption.enabled ||
-        strcmp(new_cfg.encryption.sm4_key, ctx->config.encryption.sm4_key) != 0) {
+    if (new_cfg->encryption.enabled != ctx->config.encryption.enabled ||
+        strcmp(new_cfg->encryption.sm4_key, ctx->config.encryption.sm4_key) != 0) {
         crypto_cleanup();
-        ctx->config.encryption = new_cfg.encryption;
+        ctx->config.encryption = new_cfg->encryption;
         if (ctx->config.encryption.enabled) {
             if (crypto_init(&ctx->config.encryption) < 0) {
                 LOG_ERROR("Config reload: crypto re-init failed, encryption disabled");
@@ -712,6 +727,7 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     }
 
     LOG_INFO("Configuration reloaded successfully");
+    free(new_cfg);
     return 0;
 }
 
@@ -720,6 +736,11 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
 int main(int argc, char *argv[])
 {
     global_ctx_t   ctx;
+    g_ctx = calloc(1, sizeof(global_ctx_t));
+    if (!g_ctx) {
+        fprintf(stderr, "FATAL: unable to allocate global context\n");
+        return 1;
+    }
     const char    *config_path = NULL;
     int            ret;
     uint32_t       last_periodic_ms = 0;
@@ -762,7 +783,7 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 2. 初始化全局上下文
      * ================================================================ */
-    memset(&ctx, 0, sizeof(ctx));
+    memset(g_ctx, 0, sizeof(ctx));
     ctx.raw_sock = -1;
     ctx.epoll_fd = -1;
     ctx.running  = 1;
@@ -792,7 +813,7 @@ int main(int argc, char *argv[])
      * 4b. 初始化加密模块
      * ================================================================ */
     if (ctx.config.encryption.enabled) {
-        if (crypto_init(&ctx.config.encryption) < 0) {
+        if (crypto_init(&g_ctx->config.encryption) < 0) {
             LOG_ERROR("Failed to initialize crypto module");
             return 1;
         }
@@ -818,11 +839,13 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 7. 初始化通道子系统
      * ================================================================ */
-    if (channel_init(&ctx, ctx.config.max_channels) != 0) {
+    if (channel_init(g_ctx, ctx.config.max_channels) != 0) {
         LOG_ERROR("Failed to initialize channel subsystem");
-        cleanup(&ctx);
+        cleanup(g_ctx);
         return 1;
     }
+
+    build_listener_bases(g_ctx);
 
     /* ================================================================
      * 8. 创建 AF_PACKET 原始套接字
@@ -833,7 +856,7 @@ int main(int argc, char *argv[])
         ctx.raw_sock = af_packet_create(ctx.config.interface, ethertype_n, &ctx.ifindex);
         if (ctx.raw_sock < 0) {
             LOG_ERROR("Failed to create AF_PACKET socket on %s", ctx.config.interface);
-            cleanup(&ctx);
+            cleanup(g_ctx);
             return 1;
         }
         ctx.ethertype = ethertype_n;
@@ -850,7 +873,7 @@ int main(int argc, char *argv[])
                      ctx.local_mac[3], ctx.local_mac[4], ctx.local_mac[5]);
         } else {
             LOG_ERROR("Failed to auto-discover local MAC on %s", ctx.config.interface);
-            cleanup(&ctx);
+            cleanup(g_ctx);
             return 1;
         }
     } else {
@@ -885,7 +908,7 @@ int main(int argc, char *argv[])
      * ================================================================ */
     if (af_packet_set_bpf(ctx.raw_sock, ctx.ethertype) != 0) {
         LOG_ERROR("Failed to set BPF filter for ethertype 0x%04X", ctx.config.ethertype);
-        cleanup(&ctx);
+        cleanup(g_ctx);
         return 1;
     }
     LOG_INFO("BPF filter set for ethertype 0x%04X", ctx.config.ethertype);
@@ -894,17 +917,17 @@ int main(int argc, char *argv[])
      * 13. 创建通道并为每个通道启动代理监听
      * ================================================================ */
     for (int i = 0; i < ctx.config.channel_count; i++) {
-        channel_config_t *ch_cfg = &ctx.config.channels[i];
+        channel_config_t *ch_cfg = &g_ctx->config.channels[i];
 
         /* 统一使用 LISTENER 角色 — 不发 SYN，仅作为配置载体 */
-        channel_t *ch = channel_create(&ctx, ch_cfg->channel_id,
+        channel_t *ch = channel_create(g_ctx, ch_cfg->channel_id,
                                         CHANNEL_ROLE_LISTENER,
                                         ch_cfg->listen_port, ch_cfg->remote_port,
                                         ch_cfg->listen_addr, ch_cfg->remote_addr,
                                         ch_cfg->is_tcp);
         if (ch == NULL) {
             LOG_ERROR("Failed to create channel id=%u", ch_cfg->channel_id);
-            cleanup(&ctx);
+            cleanup(g_ctx);
             return 1;
         }
 
@@ -921,10 +944,10 @@ int main(int argc, char *argv[])
 
         /* 启动代理：frontend 节点监听本地端口 */
         if (ctx.config.node_type == NODE_TYPE_FRONTEND) {
-            if (proxy_start_listen(&ctx, ch) != 0) {
+            if (proxy_start_listen(g_ctx, ch) != 0) {
                 LOG_ERROR("Failed to start listen for channel id=%u",
                           ch_cfg->channel_id);
-                cleanup(&ctx);
+                cleanup(g_ctx);
                 return 1;
             }
         }
@@ -939,10 +962,10 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 14. 将 AF_PACKET 套接字加入 epoll
      * ================================================================ */
-    ret = proxy_epoll_add(&ctx, ctx.raw_sock, NULL);
+    ret = proxy_epoll_add(g_ctx, ctx.raw_sock, NULL);
     if (ret != 0) {
         LOG_ERROR("Failed to add raw socket to epoll");
-        cleanup(&ctx);
+        cleanup(g_ctx);
         return 1;
     }
 
@@ -974,7 +997,7 @@ int main(int argc, char *argv[])
                 if (errno == EINTR) {
                     /* 被信号中断，检查是否退出或重载 */
                     if (ctx.reload_requested) {
-                        if (config_reload(&ctx, ctx.config_path) == 0) {
+                        if (config_reload(g_ctx, ctx.config_path) == 0) {
                             LOG_INFO("Configuration reloaded (SIGHUP)");
                         }
                         ctx.reload_requested = 0;
@@ -1053,14 +1076,14 @@ int main(int argc, char *argv[])
                         }
 
                         /* 路由到通道处理 */
-                        channel_process_frame(&ctx, &hdr, payload, payload_len);
+                        channel_process_frame(g_ctx, &hdr, payload, payload_len);
                     }
                     if (frame_count >= MAX_FRAMES_PER_CYCLE) {
                         LOG_WARN("Reached max frames per cycle (%d), possible frame flood", MAX_FRAMES_PER_CYCLE);
                     }
                 } else {
                     /* 代理事件：本地套接字 I/O */
-                    proxy_handle_event(&ctx, fd, ev);
+                    proxy_handle_event(g_ctx, fd, ev);
                 }
             }
 
@@ -1090,7 +1113,7 @@ int main(int argc, char *argv[])
 
             /* ---- 配置重载请求 ---- */
             if (ctx.reload_requested) {
-                if (config_reload(&ctx, ctx.config_path) == 0) {
+                if (config_reload(g_ctx, ctx.config_path) == 0) {
                     LOG_INFO("Configuration reloaded (SIGHUP)");
                 }
                 ctx.reload_requested = 0;
@@ -1102,7 +1125,7 @@ int main(int argc, char *argv[])
      * 17. 清理退出
      * ================================================================ */
     LOG_INFO("Shutting down...");
-    cleanup(&ctx);
+    cleanup(g_ctx);
     LOG_INFO("KCP-over-AF_PACKET stopped.");
 
     return 0;

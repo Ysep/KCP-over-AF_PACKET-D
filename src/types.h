@@ -20,7 +20,7 @@
 /* MyProto 协议常量 */
 #define MYPROTO_MAGIC           0x4D50      /* 'MP' - 魔数，用于帧识别 */
 #define MYPROTO_VERSION         0x01        /* 协议版本号 */
-#define MYPROTO_HDR_SIZE        8           /* 协议头大小（字节） */
+#define MYPROTO_HDR_SIZE        9           /* 协议头大小（字节） */
 #define MYPROTO_ETHERTYPE       0x88B5      /* 自定义 EtherType */
 
 /* 帧标志位定义 */
@@ -60,11 +60,11 @@
 #define KCP_UPDATE_INTERVAL     10          /* ikcp_update 调用间隔（ms） */
 
 /* Channel 常量 */
-#define MAX_CHANNELS            4096        /* 最大通道配置数 */
+#define MAX_CHANNELS            65536       /* 最大通道配置数 */
 #define CHANNEL_HASH_SIZE_DEFAULT 1024      /* 默认哈希表大小 */
 #define CHANNEL_RECV_BUF_SIZE   8192        /* 通道接收缓冲区大小 */
 #define CHANNEL_ID_STATIC_MIN   1           /* 静态通道 ID 最小值 */
-#define HEARTBEAT_CH_ID         0xFFFF      /* 全局心跳通道ID */
+#define HEARTBEAT_CH_ID         0xFFFFFFFF  /* 全局心跳通道ID */
 
 /* 超时与心跳 */
 #define HEARTBEAT_INTERVAL      10          /* 心跳发送间隔（秒） */
@@ -137,17 +137,16 @@ typedef enum {
  * 协议头结构体
  * ============================================================================ */
 
-/* MyProto 协议头（8 字节，紧凑打包） */
+/* MyProto 协议头（9 字节，紧凑打包） */
 typedef struct __attribute__((packed)) {
-    uint16_t magic;         /* 魔数 0x4D50 ('MP') */
-    uint8_t  version;       /* 协议版本，当前 0x01 */
-    uint8_t  flags;         /* 帧标志位 */
-    uint16_t channel_id;    /* 通道标识符 */
-    uint16_t data_len;      /* 负载长度（字节） */
+    uint32_t channel_id;   /* 通道标识符 */
+    uint8_t  flags;        /* 帧标志位 */
+    uint16_t payload_len;  /* 负载长度（字节） */
+    uint16_t header_crc;   /* 头部 CRC 校验 */
 } myproto_hdr_t;
 
-/* 确保协议头大小为 8 字节 */
-_Static_assert(sizeof(myproto_hdr_t) == 8, "myproto_hdr_t must be 8 bytes");
+/* 确保协议头大小为 9 字节 */
+_Static_assert(sizeof(myproto_hdr_t) == 9, "myproto_hdr_t must be 9 bytes");
 
 /* ============================================================================
  * 配置结构体
@@ -155,7 +154,7 @@ _Static_assert(sizeof(myproto_hdr_t) == 8, "myproto_hdr_t must be 8 bytes");
 
 /* 单通道配置 */
 typedef struct {
-    uint16_t    channel_id;                 /* 通道 ID */
+    uint32_t    channel_id;                 /* 通道 ID */
     uint16_t    listen_port;                /* 本地监听端口 */
     uint16_t    remote_port;                /* 远端目标端口 */
     char        listen_addr[MAX_LISTEN_ADDR];  /* 本地监听地址 */
@@ -241,7 +240,7 @@ struct IKCPCB;  /* KCP 控制块 */
 
 typedef struct channel_s {
     /* 标识 */
-    uint16_t        channel_id;         /* 通道 ID */
+    uint32_t        channel_id;         /* 通道 ID */
     channel_state_t state;              /* 当前状态 */
     channel_role_t  role;               /* 通道角色 */
     uint32_t        flags;              /* 标志位（CH_FLAG_*） */
@@ -315,7 +314,9 @@ typedef struct {
     volatile int    running;            /* 运行标志 */
     volatile int    reload_requested;   /* 配置重载请求 */
     char            config_path[MAX_CONFIG_PATH]; /* 配置文件路径（用于热重载） */
-    uint16_t        next_dynamic_channel_id; /* 下一个动态分配的 channel_id */
+    uint32_t        next_dynamic_channel_id; /* 下一个动态分配的 channel_id */
+    uint32_t        listener_base[MAX_CHANNELS];  /* 每个 listener 的 ID 池起始偏移 */
+    uint32_t        listener_next[MAX_CHANNELS];  /* 每个 listener 的下一个动态 ID */
     uint32_t        last_global_heartbeat;  /* 上一次全局心跳响应时间 */
 
     /* 统计 */

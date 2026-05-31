@@ -171,11 +171,9 @@ static void test_frame_roundtrip_multisize(void)
         int ret;
 
         memset(&hdr_in, 0, sizeof(hdr_in));
-        hdr_in.magic      = MYPROTO_MAGIC;
-        hdr_in.version    = MYPROTO_VERSION;
         hdr_in.flags      = MPF_DATA;
         hdr_in.channel_id = 42;
-        hdr_in.data_len   = (uint16_t)sz;
+        hdr_in.payload_len = (uint16_t)sz;
 
         frame_len = myproto_build_frame(buf, sizeof(buf), &hdr_in,
                                         sz > 0 ? payload : NULL, sz, 0);
@@ -187,11 +185,9 @@ static void test_frame_roundtrip_multisize(void)
                                   &parsed_payload, &parsed_len);
         CHECK(ret == 0, "myproto_parse_frame failed");
 
-        CHECK(hdr_out.magic      == MYPROTO_MAGIC,  "magic mismatch");
-        CHECK(hdr_out.version    == MYPROTO_VERSION, "version mismatch");
         CHECK(hdr_out.flags      == MPF_DATA,        "flags mismatch");
         CHECK(hdr_out.channel_id == 42,              "channel_id mismatch");
-        CHECK(hdr_out.data_len   == (uint16_t)sz,     "data_len mismatch");
+        CHECK(hdr_out.payload_len == (uint16_t)sz,     "payload_len mismatch");
         CHECK(parsed_len         == sz,              "parsed_len mismatch");
 
         if (sz > 0) {
@@ -245,12 +241,10 @@ static void test_control_frame_all_types(void)
                                   &payload, &payload_len);
         CHECK(ret == 0, "parse control frame failed");
 
-        CHECK(hdr.magic      == MYPROTO_MAGIC,  "magic mismatch");
-        CHECK(hdr.version    == MYPROTO_VERSION, "version mismatch");
         CHECK(hdr.flags      == ctrl_types[i].flag,
               "flags mismatch for control type");
         CHECK(hdr.channel_id == 1,              "channel_id mismatch");
-        CHECK(hdr.data_len   == 0,              "data_len should be 0");
+        CHECK(hdr.payload_len   == 0,              "payload_len should be 0");
         CHECK(payload_len    == 0,              "payload_len should be 0");
 
         /* Verify that it's recognized as a control frame */
@@ -286,11 +280,9 @@ static void test_crc32_roundtrip(void)
     }
 
     memset(&hdr, 0, sizeof(hdr));
-    hdr.magic      = MYPROTO_MAGIC;
-    hdr.version    = MYPROTO_VERSION;
     hdr.flags      = 0;
     hdr.channel_id = 99;
-    hdr.data_len   = 512;
+    hdr.payload_len = 512;
 
     /* Build frame with CRC */
     frame_len = myproto_build_frame(buf, sizeof(buf), &hdr,
@@ -442,11 +434,9 @@ static void test_heartbeat_channel_routing(void)
     /* Verify myproto_validate_hdr accepts HEARTBEAT_CH_ID */
     {
         memset(&hdr, 0, sizeof(hdr));
-        hdr.magic      = MYPROTO_MAGIC;
-        hdr.version    = MYPROTO_VERSION;
         hdr.flags      = MPF_PING;
         hdr.channel_id = HEARTBEAT_CH_ID;
-        hdr.data_len   = 0;
+        hdr.payload_len = 0;
 
         int ret = myproto_validate_hdr(&hdr);
         CHECK(ret == 0, "validate_hdr should accept HEARTBEAT_CH_ID");
@@ -475,7 +465,7 @@ static void test_channel_syn_ack_flow(void)
 {
     TEST("channel SYN/ACK flow — SYN_SENT → SYN_RCVD → ESTABLISHED");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t syn_hdr;
     uint8_t syn_frame[256];
@@ -562,7 +552,7 @@ static void test_channel_fin_handshake(void)
 {
     TEST("channel FIN handshake — ESTABLISHED→FIN_RCVD, FIN_SENT→TIME_WAIT");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t fin_hdr;
     uint8_t fin_frame[256];
@@ -644,7 +634,7 @@ static void test_channel_rst_cleanup(void)
 {
     TEST("channel RST cleanup — ESTABLISHED receives RST → destroyed");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t rst_hdr;
     uint8_t rst_frame[256];
@@ -700,7 +690,7 @@ static void test_channel_duplicate_syn(void)
 {
     TEST("channel duplicate SYN — ESTABLISHED stays ESTABLISHED");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t syn_hdr;
     uint8_t syn_frame[256];
@@ -753,7 +743,7 @@ static void test_syn_on_closing_channel(void)
 {
     TEST("SYN on closing channel — FIN_SENT ignores SYN");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch;
     myproto_hdr_t syn_hdr;
     uint8_t syn_frame[256];
@@ -809,7 +799,7 @@ static void test_max_channels_stress(void)
 {
     TEST("max channels stress — 0..255 succeed, 256 fails");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *channels[256];
     int i, ret;
 
@@ -821,7 +811,7 @@ static void test_max_channels_stress(void)
 
     /* Create channels 0..255 */
     for (i = 0; i < 256; i++) {
-        channels[i] = channel_create(&ctx, (uint16_t)i,
+        channels[i] = channel_create(&ctx, (uint32_t)i,
                                      CHANNEL_ROLE_RESPONDER,
                                      8080, 9090, "127.0.0.1", "192.168.1.1", 1);
         CHECK(channels[i] != NULL, "channel_create should succeed");
@@ -829,7 +819,7 @@ static void test_max_channels_stress(void)
 
     /* Verify all are findable */
     for (i = 0; i < 256; i++) {
-        channel_t *found = channel_find(&ctx, (uint16_t)i);
+        channel_t *found = channel_find(&ctx, (uint32_t)i);
         CHECK(found == channels[i], "channel should be findable");
     }
 
@@ -856,7 +846,7 @@ static void test_hash_collision(void)
 {
     TEST("hash collision — IDs 0, 512, 1024 with hash_size=512");
 
-    global_ctx_t ctx;
+    static global_ctx_t ctx;
     channel_t *ch0, *ch512, *ch1024;
     int ret;
 
@@ -1052,75 +1042,75 @@ static void test_max_config_fields(void)
 {
     TEST("max config fields — populate all fields and verify");
 
-    global_config_t cfg;
-
-    memset(&cfg, 0, sizeof(cfg));
+    global_config_t *cfg = (global_config_t *)calloc(1, sizeof(global_config_t));
+    CHECK(cfg != NULL, "calloc failed");
 
     /* Interface config */
-    strncpy(cfg.interface, "eth1", MAX_INTERFACE_NAME - 1);
-    cfg.ethertype = MYPROTO_ETHERTYPE;
-    memset(cfg.local_mac, 0x11, ETH_MAC_ADDR_LEN);
-    memset(cfg.peer_mac, 0x22, ETH_MAC_ADDR_LEN);
+    strncpy(cfg->interface, "eth1", MAX_INTERFACE_NAME - 1);
+    cfg->ethertype = MYPROTO_ETHERTYPE;
+    memset(cfg->local_mac, 0x11, ETH_MAC_ADDR_LEN);
+    memset(cfg->peer_mac, 0x22, ETH_MAC_ADDR_LEN);
 
     /* KCP config */
-    cfg.kcp_mtu         = KCP_MTU_CONSERVATIVE;
-    cfg.kcp_send_window = KCP_SEND_WINDOW;
-    cfg.kcp_recv_window = KCP_RECV_WINDOW;
-    cfg.kcp_nodelay     = KCP_NODELAY;
-    cfg.kcp_interval    = KCP_INTERVAL;
-    cfg.kcp_resend      = KCP_RESEND;
-    cfg.kcp_nc          = KCP_NC;
+    cfg->kcp_mtu         = KCP_MTU_CONSERVATIVE;
+    cfg->kcp_send_window = KCP_SEND_WINDOW;
+    cfg->kcp_recv_window = KCP_RECV_WINDOW;
+    cfg->kcp_nodelay     = KCP_NODELAY;
+    cfg->kcp_interval    = KCP_INTERVAL;
+    cfg->kcp_resend      = KCP_RESEND;
+    cfg->kcp_nc          = KCP_NC;
 
     /* Proxy config */
-    cfg.node_type          = NODE_TYPE_BACKEND;
-    cfg.max_channels       = 512;
-    cfg.heartbeat_interval = 15;
-    cfg.heartbeat_timeout  = 90;
+    cfg->node_type          = NODE_TYPE_BACKEND;
+    cfg->max_channels       = 512;
+    cfg->heartbeat_interval = 15;
+    cfg->heartbeat_timeout  = 90;
 
     /* Encryption */
-    cfg.encryption.enabled = 1;
-    strncpy(cfg.encryption.sm4_key, "00112233445566778899aabbccddeeff",
+    cfg->encryption.enabled = 1;
+    strncpy(cfg->encryption.sm4_key, "00112233445566778899aabbccddeeff",
             SM4_KEY_HEX_LEN);
-    cfg.encryption.sm4_key[SM4_KEY_HEX_LEN] = '\0';
+    cfg->encryption.sm4_key[SM4_KEY_HEX_LEN] = '\0';
 
     /* CRC */
-    cfg.crc_enabled = 1;
+    cfg->crc_enabled = 1;
 
     /* NIC MTU */
-    cfg.auto_set_nic_mtu = 0;
-    cfg.nic_mtu          = 1500;
+    cfg->auto_set_nic_mtu = 0;
+    cfg->nic_mtu          = 1500;
 
     /* Multi-instance */
-    strncpy(cfg.pid_file, "/var/run/kcp-test.pid", MAX_PID_PATH - 1);
-    strncpy(cfg.instance_name, "test-instance", MAX_LISTEN_ADDR - 1);
+    strncpy(cfg->pid_file, "/var/run/kcp-test.pid", MAX_PID_PATH - 1);
+    strncpy(cfg->instance_name, "test-instance", MAX_LISTEN_ADDR - 1);
 
     /* Verify all key fields */
-    CHECK(strcmp(cfg.interface, "eth1") == 0, "interface mismatch");
-    CHECK(cfg.ethertype == MYPROTO_ETHERTYPE, "ethertype mismatch");
-    CHECK(cfg.local_mac[0] == 0x11, "local_mac mismatch");
-    CHECK(cfg.peer_mac[0]  == 0x22, "peer_mac mismatch");
-    CHECK(cfg.kcp_mtu         == KCP_MTU_CONSERVATIVE, "kcp_mtu mismatch");
-    CHECK(cfg.kcp_send_window == KCP_SEND_WINDOW, "kcp_send_window mismatch");
-    CHECK(cfg.kcp_recv_window == KCP_RECV_WINDOW, "kcp_recv_window mismatch");
-    CHECK(cfg.kcp_nodelay     == KCP_NODELAY, "kcp_nodelay mismatch");
-    CHECK(cfg.kcp_interval    == KCP_INTERVAL, "kcp_interval mismatch");
-    CHECK(cfg.kcp_resend      == KCP_RESEND, "kcp_resend mismatch");
-    CHECK(cfg.kcp_nc          == KCP_NC, "kcp_nc mismatch");
-    CHECK(cfg.node_type          == NODE_TYPE_BACKEND, "node_type mismatch");
-    CHECK(cfg.max_channels       == 512, "max_channels mismatch");
-    CHECK(cfg.heartbeat_interval == 15, "heartbeat_interval mismatch");
-    CHECK(cfg.heartbeat_timeout  == 90, "heartbeat_timeout mismatch");
-    CHECK(cfg.encryption.enabled == 1, "encryption.enabled mismatch");
-    CHECK(strcmp(cfg.encryption.sm4_key,
+    CHECK(strcmp(cfg->interface, "eth1") == 0, "interface mismatch");
+    CHECK(cfg->ethertype == MYPROTO_ETHERTYPE, "ethertype mismatch");
+    CHECK(cfg->local_mac[0] == 0x11, "local_mac mismatch");
+    CHECK(cfg->peer_mac[0]  == 0x22, "peer_mac mismatch");
+    CHECK(cfg->kcp_mtu         == KCP_MTU_CONSERVATIVE, "kcp_mtu mismatch");
+    CHECK(cfg->kcp_send_window == KCP_SEND_WINDOW, "kcp_send_window mismatch");
+    CHECK(cfg->kcp_recv_window == KCP_RECV_WINDOW, "kcp_recv_window mismatch");
+    CHECK(cfg->kcp_nodelay     == KCP_NODELAY, "kcp_nodelay mismatch");
+    CHECK(cfg->kcp_interval    == KCP_INTERVAL, "kcp_interval mismatch");
+    CHECK(cfg->kcp_resend      == KCP_RESEND, "kcp_resend mismatch");
+    CHECK(cfg->kcp_nc          == KCP_NC, "kcp_nc mismatch");
+    CHECK(cfg->node_type          == NODE_TYPE_BACKEND, "node_type mismatch");
+    CHECK(cfg->max_channels       == 512, "max_channels mismatch");
+    CHECK(cfg->heartbeat_interval == 15, "heartbeat_interval mismatch");
+    CHECK(cfg->heartbeat_timeout  == 90, "heartbeat_timeout mismatch");
+    CHECK(cfg->encryption.enabled == 1, "encryption.enabled mismatch");
+    CHECK(strcmp(cfg->encryption.sm4_key,
                  "00112233445566778899aabbccddeeff") == 0,
           "encryption.sm4_key mismatch");
-    CHECK(cfg.crc_enabled == 1, "crc_enabled mismatch");
-    CHECK(cfg.nic_mtu == 1500, "nic_mtu mismatch");
-    CHECK(strcmp(cfg.pid_file, "/var/run/kcp-test.pid") == 0,
+    CHECK(cfg->crc_enabled == 1, "crc_enabled mismatch");
+    CHECK(cfg->nic_mtu == 1500, "nic_mtu mismatch");
+    CHECK(strcmp(cfg->pid_file, "/var/run/kcp-test.pid") == 0,
           "pid_file mismatch");
-    CHECK(strcmp(cfg.instance_name, "test-instance") == 0,
+    CHECK(strcmp(cfg->instance_name, "test-instance") == 0,
           "instance_name mismatch");
 
+    free(cfg);
     PASS();
     return;
 cleanup:
