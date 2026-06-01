@@ -16,6 +16,7 @@ SRCS := $(SRCDIR)/main.c \
         $(SRCDIR)/kcp_wrap.c \
         $(SRCDIR)/channel.c \
         $(SRCDIR)/proxy.c \
+        $(SRCDIR)/acl.c \
         $(SRCDIR)/ikcp.c
 
 # -------------------- 目标文件与依赖文件 --------------------
@@ -99,7 +100,7 @@ TEST_MYPROTO_LIBS := -lnettle
 TEST_MYPROTO_BIN := tests/test_myproto
 
 # 集成测试
-TEST_INTEG_SRC   := tests/test_integration.c src/main.c src/af_packet.c src/myproto.c src/crypto.c src/kcp_wrap.c src/channel.c src/proxy.c src/ikcp.c
+TEST_INTEG_SRC   := tests/test_integration.c src/main.c src/af_packet.c src/myproto.c src/crypto.c src/kcp_wrap.c src/channel.c src/proxy.c src/acl.c src/ikcp.c
 TEST_INTEG_BIN   := tests/test_integration
 TEST_INTEG_FLAGS := $(TEST_CFLAGS) -DTEST_BUILD -Wno-unused-function
 TEST_INTEG_LIBS  := -ljson-c -lrt -lnettle

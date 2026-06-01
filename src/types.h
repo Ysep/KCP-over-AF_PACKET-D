@@ -276,6 +276,44 @@ _Static_assert(sizeof(myproto_hdr_t) == 9, "myproto_hdr_t must be 9 bytes");
  * 配置结构体
  * ============================================================================ */
 
+/* ── 客户端访问控制 (ACL) ──────────────────────────────────────────
+ * 每个 listener 通道可配置客户端 IP/端口白名单。
+ * 存储在 channel_config_t 中，通过 channels[] 数组 + listener_idx 访问。
+ */
+#define MAX_ACL_IPS    16
+#define MAX_ACL_PORTS  8
+
+typedef enum {
+    ACL_IP_SINGLE = 1,
+    ACL_IP_CIDR   = 2,
+    ACL_IP_RANGE  = 3
+} acl_ip_type_t;
+
+typedef enum {
+    ACL_PORT_SINGLE = 1,
+    ACL_PORT_RANGE  = 2
+} acl_port_type_t;
+
+typedef struct {
+    uint8_t  type;           /* acl_ip_type_t: SINGLE / CIDR / RANGE */
+    uint32_t addr;           /* 网络字节序: 起始 IP 或单 IP */
+    uint32_t mask_or_end;    /* CIDR: 网络字节序掩码; RANGE: 结束 IP */
+} acl_ip_entry_t;
+
+typedef struct {
+    uint8_t  type;           /* acl_port_type_t: SINGLE / RANGE */
+    uint16_t port_start;     /* 起始端口 */
+    uint16_t port_end;       /* 结束端口（SINGLE 时等于 port_start） */
+} acl_port_entry_t;
+
+typedef struct {
+    uint8_t          enabled;     /* 是否启用 ACL */
+    uint8_t          ip_count;    /* IP 规则有效条目数 */
+    acl_ip_entry_t   ips[MAX_ACL_IPS];
+    uint8_t          port_count;  /* 端口规则有效条目数 */
+    acl_port_entry_t ports[MAX_ACL_PORTS];
+} channel_acl_t;
+
 /* ── 单通道配置 ──────────────────────────────────────────────────
  * 每个 channel_config_t 描述一条转发规则。
  *
@@ -299,6 +337,7 @@ typedef struct {
     uint8_t     is_tcp;                     /* 1=TCP, 0=UDP */
     uint8_t     enabled;                    /* 是否启用此通道：0=禁用（跳过），1=启用 */
     uint16_t    max_sessions;               /* 此端口最大并发数：0=默认1，超限拒绝新连接 */
+    channel_acl_t client_acl;               /* 客户端 IP/端口访问控制 */
 } channel_config_t;
 
 /* 加密配置（兼容B项目的crypto.h接口） */

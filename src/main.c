@@ -86,6 +86,7 @@
 #include "myproto.h"
 #include "kcp_wrap.h"
 #include "channel.h"
+#include "acl.h"
 #include "proxy.h"
 #include "crypto.h"
 
@@ -242,6 +243,113 @@ static int mac_is_broadcast(const uint8_t mac[ETH_MAC_ADDR_LEN])
  * @param config  输出：填充后的全局配置结构体
  * @return        0=成功, -1=解析或分配失败
  * ────────────────────────────────────────────────────────────────────────── */
+
+/* ── ACL 解析辅助 ── */
+
+static uint32_t cidr_prefix_to_mask(int prefix_len)
+{
+    if (prefix_len <= 0) return 0;
+    if (prefix_len >= 32) return 0xFFFFFFFF;
+    return htonl(0xFFFFFFFF << (32 - prefix_len));
+}
+
+static void parse_acl(json_object *obj, channel_acl_t *acl)
+{
+    memset(acl, 0, sizeof(*acl));
+
+    json_object *acl_obj = json_object_object_get(obj, "client_acl");
+    if (!acl_obj) return;  /* 未配置 → enabled 保持 0 */
+
+    acl->enabled = 1;
+
+    json_object *arr;
+
+    /* ── IP 白名单 ── */
+    if (json_object_object_get_ex(acl_obj, "ips", &arr) &&
+        json_object_is_type(arr, json_type_array)) {
+        int count = json_object_array_length(arr);
+        for (int i = 0; i < count; i++) {
+            if (acl->ip_count >= MAX_ACL_IPS) {
+                LOG_WARN("parse_acl: ip_count exceeds MAX_ACL_IPS(%d), truncated",
+                         MAX_ACL_IPS);
+                break;
+            }
+            const char *str = json_object_get_string(
+                json_object_array_get_idx(arr, (size_t)i));
+            acl_ip_entry_t *entry = &acl->ips[acl->ip_count];
+
+            /* 判断格式 */
+            const char *slash = strchr(str, '/');
+            const char *dash  = strchr(str, '-');
+
+            if (slash) {
+                /* CIDR: "10.0.1.0/24" */
+                entry->type = ACL_IP_CIDR;
+                char addr_buf[64];
+                size_t len = (size_t)(slash - str);
+                if (len < sizeof(addr_buf)) {
+                    memcpy(addr_buf, str, len);
+                    addr_buf[len] = '\0';
+                    entry->addr = inet_addr(addr_buf);
+                }
+                int prefix = atoi(slash + 1);
+                entry->mask_or_end = cidr_prefix_to_mask(prefix);
+            } else if (dash) {
+                /* RANGE: "192.168.0.10-192.168.0.50" */
+                entry->type = ACL_IP_RANGE;
+                char start_buf[64];
+                size_t len = (size_t)(dash - str);
+                if (len < sizeof(start_buf)) {
+                    memcpy(start_buf, str, len);
+                    start_buf[len] = '\0';
+                    entry->addr = inet_addr(start_buf);
+                }
+                entry->mask_or_end = inet_addr(dash + 1);
+            } else {
+                /* SINGLE: "10.0.0.5" */
+                entry->type = ACL_IP_SINGLE;
+                entry->addr = inet_addr(str);
+            }
+
+            if (entry->addr == INADDR_NONE && entry->type != ACL_IP_CIDR) {
+                LOG_WARN("parse_acl: invalid IP '%s', skipped", str);
+                continue;
+            }
+            acl->ip_count++;
+        }
+    }
+
+    /* ── 端口白名单 ── */
+    if (json_object_object_get_ex(acl_obj, "ports", &arr) &&
+        json_object_is_type(arr, json_type_array)) {
+        int count = json_object_array_length(arr);
+        for (int i = 0; i < count; i++) {
+            if (acl->port_count >= MAX_ACL_PORTS) {
+                LOG_WARN("parse_acl: port_count exceeds MAX_ACL_PORTS(%d), truncated",
+                         MAX_ACL_PORTS);
+                break;
+            }
+            const char *str = json_object_get_string(
+                json_object_array_get_idx(arr, (size_t)i));
+            acl_port_entry_t *entry = &acl->ports[acl->port_count];
+
+            const char *dash = strchr(str, '-');
+            if (dash) {
+                /* RANGE: "1024-65535" */
+                entry->type = ACL_PORT_RANGE;
+                entry->port_start = (uint16_t)atoi(str);
+                entry->port_end   = (uint16_t)atoi(dash + 1);
+            } else {
+                /* SINGLE: "8080" */
+                entry->type = ACL_PORT_SINGLE;
+                entry->port_start = (uint16_t)atoi(str);
+                entry->port_end   = entry->port_start;
+            }
+            acl->port_count++;
+        }
+    }
+}
+
 int config_load(const char *path, global_config_t *config)
 {
     struct json_object *root = NULL;
@@ -503,6 +611,9 @@ int config_load(const char *path, global_config_t *config)
             } else {
                 ch_cfg->max_sessions = 1;
             }
+
+            /* 客户端 IP/端口 ACL */
+            parse_acl(ch_obj, &ch_cfg->client_acl);
 
             config->channel_count++;
         }
@@ -806,7 +917,13 @@ static void config_reload_channels(global_ctx_t *ctx,
                 continue;
             }
 
-            if (channel_config_changed(old_ch, new_ch)) {
+            /* ACL 变更检测（channel_config_changed 不接收 ctx） */
+            int acl_changed = (memcmp(
+                &ctx->config.channels[old_ch->listener_idx].client_acl,
+                &new_ch->client_acl,
+                sizeof(channel_acl_t)) != 0);
+
+            if (channel_config_changed(old_ch, new_ch) || acl_changed) {
                 /* 修改通道：预检 → 关闭旧 listener → 更新配置 → 启动新 */
                 if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
                     if (proxy_port_probe(new_ch->listen_addr,
@@ -1068,6 +1185,7 @@ static int ctl_parse_channel(json_object *ch_obj, channel_config_t *cfg)
         int ms = json_object_get_int(tmp);
         cfg->max_sessions = (ms > 0 && ms <= 65535) ? (uint16_t)ms : 1;
     }
+    parse_acl(ch_obj, &cfg->client_acl);
     return 0;
 }
 

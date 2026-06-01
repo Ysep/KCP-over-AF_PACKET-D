@@ -59,6 +59,7 @@
 #endif
 
 #include "proxy.h"
+#include "acl.h"
 #include "channel.h"
 #include "ikcp.h"
 #include "kcp_wrap.h"
@@ -461,6 +462,28 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
             }
             LOG_ERROR("proxy_accept: accept4() failed: %s", strerror(errno));
             return -1;
+        }
+
+        /* ── ACL 检查（仅 STATIC_LISTENER 通道）── */
+        if (ch->flags & CH_FLAG_STATIC_LISTENER) {
+            struct sockaddr_storage peer_addr;
+            socklen_t peer_len = sizeof(peer_addr);
+
+            if (getpeername(client_fd, (struct sockaddr *)&peer_addr,
+                            &peer_len) == 0) {
+                uint32_t ip;
+                uint16_t port;
+                if (extract_ip_port(&peer_addr, &ip, &port)) {
+                    channel_acl_t *acl =
+                        &ctx->config.channels[ch->listener_idx].client_acl;
+                    if (!acl_check(acl, ip, port)) {
+                        LOG_DEBUG("proxy_accept: ACL rejected ch=%u",
+                                  ch->channel_id);
+                        close(client_fd);
+                        continue;
+                    }
+                }
+            }
         }
 
         /*
