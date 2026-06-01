@@ -413,7 +413,7 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
  *   1. accept4() 循环直到 EAGAIN，一次性消费所有待处理连接。
  *   2. 设置 TCP_NODELAY（禁用 Nagle）+ SO_KEEPALIVE（检测死连接）。
  *
- * 多会话模式 (STATIC_LISTENER + max_sessions > 1)：
+ * 多会话模式 (STATIC_LISTENER + max_sessions >= 1)：
  *   - 通过 alloc_channel_id() 分配新的动态 channel_id
  *   - channel_create() 创建新的动态通道（INITIATOR 角色）
  *   - 复制网络层信息（raw_sock, ifindex, ethertype, local/peer MAC）
@@ -519,12 +519,13 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
         }
 
         /*
-         * 多会话模式：listener 标志 + max_sessions>1 → 创建动态通道。
-         * 单会话模式：绑定到 ch 自身（旧行为）。
+         * 多会话模式：listener 标志 + max_sessions>=1 → 创建动态通道。
+         * max_sessions=1 也使用动态通道，保持架构一致性：
+         * listener 仅负责 accept，数据始终通过动态通道传输。
          */
         if ((ch->flags & CH_FLAG_STATIC_LISTENER) &&
             ch->listener_idx < ctx->config.channel_count &&
-            ctx->config.channels[ch->listener_idx].max_sessions > 1) {
+            ctx->config.channels[ch->listener_idx].max_sessions >= 1) {
 
             uint32_t new_id = alloc_channel_id(ctx, ch->listener_idx);
             if (new_id == 0) {
