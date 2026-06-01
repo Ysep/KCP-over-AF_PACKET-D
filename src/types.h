@@ -588,9 +588,9 @@ typedef struct {
 /* 安全检查：数组元素数 */
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
-/* 时间戳辅助 */
+/* 时间戳辅助 — 安全减法，防止系统时钟回拨导致无符号回绕 */
 #define time_now()          ((uint32_t)time(NULL))
-#define time_elapsed(t)     (time_now() - (t))
+#define time_elapsed(t)     ({ uint32_t __n = time_now(); (__n < (t)) ? (uint32_t)0 : (__n - (t)); })
 
 /* ── 日志宏 ──────────────────────────────────────────────────────
  * 四级日志系统，全部输出到 stderr（适合 systemd journal 采集）。
