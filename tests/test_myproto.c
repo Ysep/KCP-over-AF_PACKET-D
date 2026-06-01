@@ -318,11 +318,11 @@ static void test_validate_hdr_bad_channel_id(void)
     myproto_hdr_t hdr;
     memset(&hdr, 0, sizeof(hdr));
     hdr.flags      = MPF_DATA;
-    hdr.channel_id = MAX_CHANNELS + 1;
+    hdr.channel_id = 0;  /* reserved: only 0 is invalid */
     hdr.payload_len = 100;
 
     if (myproto_validate_hdr(&hdr) == 0) {
-        FAIL("bad channel_id not rejected");
+        FAIL("channel_id 0 not rejected");
         return;
     }
 
@@ -948,23 +948,43 @@ static void test_channel_id_boundary(void)
 
     uint8_t buf[MAX_FRAME_SIZE];
 
-    /* channel_id == MAX_CHANNELS should be rejected */
+    /* channel_id == 0 should be rejected (reserved) */
     ssize_t ret = myproto_build_data_frame(buf, sizeof(buf),
-                                            MAX_CHANNELS, MPF_DATA,
+                                            0, MPF_DATA,
                                             (const uint8_t*)"data", 4,
                                             0);
     if (ret >= 0) {
-        FAIL("should reject channel_id == MAX_CHANNELS");
+        FAIL("should reject channel_id == 0 (reserved)");
         return;
     }
 
-    /* channel_id == MAX_CHANNELS - 1 should work */
+    /* channel_id == MAX_CHANNELS should be accepted (dynamic channel) */
+    ret = myproto_build_data_frame(buf, sizeof(buf),
+                                    MAX_CHANNELS, MPF_DATA,
+                                    (const uint8_t*)"data", 4,
+                                    0);
+    if (ret < 0) {
+        FAIL("should accept channel_id == MAX_CHANNELS (dynamic)");
+        return;
+    }
+
+    /* channel_id == MAX_CHANNELS - 1 should work (static channel) */
     ret = myproto_build_data_frame(buf, sizeof(buf),
                                     MAX_CHANNELS - 1, MPF_DATA,
                                     (const uint8_t*)"data", 4,
                                     0);
     if (ret < 0) {
         FAIL("should accept channel_id == MAX_CHANNELS-1");
+        return;
+    }
+
+    /* channel_id == HEARTBEAT_CH_ID - 1 should work (dynamic) */
+    ret = myproto_build_data_frame(buf, sizeof(buf),
+                                    HEARTBEAT_CH_ID - 1, MPF_DATA,
+                                    (const uint8_t*)"data", 4,
+                                    0);
+    if (ret < 0) {
+        FAIL("should accept large dynamic channel_id");
         return;
     }
 

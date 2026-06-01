@@ -138,6 +138,7 @@ uint32_t myproto_crc32(const uint8_t *data, size_t len)
  * 检查项：
  *   - channel_id 必须在 [0, MAX_CHANNELS) 或等于 HEARTBEAT_CH_ID
  *   - payload_len 不得超过 ETH_MAX_PAYLOAD
+ *   - 动态 channel_id (> MAX_CHANNELS) 允许通过，由上层路由
  */
 int myproto_validate_hdr(const myproto_hdr_t *hdr)
 {
@@ -146,10 +147,16 @@ int myproto_validate_hdr(const myproto_hdr_t *hdr)
         return -1;
     }
 
-    if (hdr->channel_id >= MAX_CHANNELS && hdr->channel_id != HEARTBEAT_CH_ID) {
-        LOG_ERROR("myproto_validate_hdr: channel_id %u exceeds MAX_CHANNELS (%u)",
-                  (unsigned int)hdr->channel_id, MAX_CHANNELS);
+    if (hdr->channel_id == 0) {
+        LOG_WARN("myproto_validate_hdr: invalid channel_id 0 (reserved)");
         return -1;
+    }
+
+    if (hdr->channel_id > MAX_CHANNELS && hdr->channel_id != HEARTBEAT_CH_ID) {
+        LOG_DEBUG("myproto_validate_hdr: channel_id %u exceeds MAX_CHANNELS (%u), "
+                  "may be dynamic channel",
+                  (unsigned int)hdr->channel_id, MAX_CHANNELS);
+        /* 动态 channel_id 允许通过，不返回 -1 */
     }
 
     if (hdr->payload_len > ETH_MAX_PAYLOAD) {
@@ -342,9 +349,8 @@ ssize_t myproto_build_ctrl_frame(uint8_t *buf, size_t buf_size,
         return -1;
     }
 
-    if (channel_id >= MAX_CHANNELS && channel_id != HEARTBEAT_CH_ID) {
-        LOG_ERROR("myproto_build_ctrl_frame: invalid channel_id %u "
-                  "(max %u)", (unsigned int)channel_id, MAX_CHANNELS);
+    if (channel_id == 0) {
+        LOG_ERROR("myproto_build_ctrl_frame: invalid channel_id 0 (reserved) ");
         return -1;
     }
 
@@ -392,9 +398,8 @@ ssize_t myproto_build_data_frame(uint8_t *buf, size_t buf_size,
         return -1;
     }
 
-    if (channel_id >= MAX_CHANNELS && channel_id != HEARTBEAT_CH_ID) {
-        LOG_ERROR("myproto_build_data_frame: invalid channel_id %u "
-                  "(max %u)", (unsigned int)channel_id, MAX_CHANNELS);
+    if (channel_id == 0) {
+        LOG_ERROR("myproto_build_data_frame: invalid channel_id 0 (reserved) ");
         return -1;
     }
 
