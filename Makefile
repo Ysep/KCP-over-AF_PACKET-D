@@ -130,9 +130,14 @@ TEST_INTEG5_SRC  := tests/test_integration_v5.c src/myproto.c src/crypto.c src/c
 TEST_INTEG5_BIN  := tests/test_integration_v5
 TEST_INTEG5_LIBS := -lrt -lnettle
 
-.PHONY: test test-unit test-integ test-integ2 test-integ3 test-integ4 test-integ5 test-compare test-clean
+# 全量集成测试 v6 (24项 — crypto/channel_id/EPOLL/time/state)
+TEST_INTEG6_SRC  := tests/test_integration_v6.c src/myproto.c src/crypto.c src/channel.c src/kcp_wrap.c src/ikcp.c src/acl.c
+TEST_INTEG6_BIN  := tests/test_integration_v6
+TEST_INTEG6_LIBS := -lrt -lnettle
 
-test: test-unit test-integ test-integ2 test-integ3 test-integ4 test-integ5
+.PHONY: test test-unit test-integ test-integ2 test-integ3 test-integ4 test-integ5 test-integ6 test-compare test-clean
+
+test: test-unit test-integ test-integ2 test-integ3 test-integ4 test-integ5 test-integ6
 
 test-unit: $(TEST_MYPROTO_BIN)
 	@echo "  RUN     $(TEST_MYPROTO_BIN)"
@@ -157,6 +162,10 @@ test-integ4: $(TEST_INTEG4_BIN)
 test-integ5: $(TEST_INTEG5_BIN)
 	@echo "  RUN     $(TEST_INTEG5_BIN)"
 	@./$(TEST_INTEG5_BIN)
+
+test-integ6: $(TEST_INTEG6_BIN)
+	@echo "  RUN     $(TEST_INTEG6_BIN)"
+	@./$(TEST_INTEG6_BIN)
 
 $(TEST_MYPROTO_BIN): $(TEST_MYPROTO_SRC)
 	@mkdir -p tests
@@ -200,3 +209,8 @@ $(TEST_INTEG5_BIN): $(TEST_INTEG5_SRC)
 	@mkdir -p tests
 	@echo "  CC      $@"
 	$(CC) $(TEST_CFLAGS) -mcmodel=medium -o $@ $(TEST_INTEG5_SRC) $(TEST_INTEG5_LIBS)
+
+$(TEST_INTEG6_BIN): $(TEST_INTEG6_SRC)
+	@mkdir -p tests
+	@echo "  CC      $@"
+	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_INTEG6_SRC) $(TEST_INTEG6_LIBS)
