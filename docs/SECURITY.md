@@ -205,6 +205,7 @@ chmod 600 /etc/kcp-afpacket/key.hex
 | 通道空闲超时 | `CHANNEL_IDLE_TIMEOUT`（300s） | 回收长时间不活动的通道 |
 | TIME_WAIT 超时 | `CHANNEL_GRACEFUL_TIMEOUT`（30s） | 确保僵尸通道不会无限占用资源 |
 | 缓冲区大小限制 | `CHANNEL_RECV_BUF_SIZE = 8192` | 限制单通道接收缓冲区 |
+| 通道创建速率限制 | `channel_create_max_per_sec = 1000` (S7) | 防止 SYN flood 耗尽内存 |
 
 ### 4.2 系统级加固
 
@@ -248,6 +249,8 @@ sudo systemctl set-property kcp-afpacket.service \
 | R2 | 协议模块 | `myproto.c/h` | 缓冲区边界检查完善 |
 | R3 | 通道管理 | `channel.c` | 状态机逻辑完整，RST 处理正确 |
 | R7 | 加密模块 | `crypto.c` | 添加 `ct_len > out_cap` 检查，修复潜在的缓冲区溢出 |
+| N1-N8 | 全量审查 | 全部 8 个模块 | N1(未初始化栈变量)等 8 项缺陷 |
+| S1-S9 | 第三方安全审计 | 全部模块 | header_crc 伪实现、memcmp 侧信道、无重放保护等 9 项 |
 
 ### 安全相关修复
 
@@ -257,6 +260,13 @@ sudo systemctl set-property kcp-afpacket.service \
 | R7 | 解密输出缓冲区溢出检查 | 高 | ✅ 已修复 |
 | - | `memset` 密钥擦除优化 | 低 | ✅ 已实现 |
 | - | PKCS7 填充完整性验证 | 中 | ✅ 已实现 |
+| S1 | `header_crc` 改为 CRC-16/CCITT 计算与校验 | 严重 | ✅ 已修复 (commit 4eeb22d) |
+| S2 | HMAC 比较从 `memcmp` 改为常量时间 XOR | 严重 | ✅ 已修复 (commit 4eeb22d) |
+| S4 | CRC32 表初始化改为 `pthread_once` | 高危 | ✅ 已修复 (commit 4eeb22d) |
+| S7 | 通道创建速率限制 (1000/s) | 中 | ✅ 已修复 (commit 4eeb22d) |
+| S8 | `/dev/urandom` fd 在 `crypto_init` 时打开复用 | 中 | ✅ 已修复 (commit 4eeb22d) |
+| BPF | BPF 过滤器跳转参数 `jt/jf` 颠倒修正 | 严重 | ✅ 已修复 (commit d400b04) |
+| MAX-SESS | `max_sessions>1` → `>=1` 单会话通道一致性 | 中 | ✅ 已修复 (commit fea4a15) |
 
 ---
 
@@ -266,7 +276,7 @@ sudo systemctl set-property kcp-afpacket.service \
 
 | 限制 | 影响 | 缓解 |
 |------|------|------|
-| `memcmp` 非常量时间 | 理论 timing side-channel，可推测 HMAC 值 | LAN 场景风险可控；未来可替换为 `CRYPTO_memcmp` |
+| HMAC 恒定时间比较 | 无（已修复） | 逐字节 XOR 累积比较，防 timing side-channel |
 | 不支持 AEAD（GCM/CCM） | 不提供关联数据认证（如协议头保护） | 当前设计将协议头视为可信元数据 |
 | IV 依赖 `/dev/urandom` | 容器/沙箱可能缺少设备节点 | 部署前确认 `/dev/urandom` 可用 |
 | 控制帧不加密 | SYN/ACK/FIN/RST 的 channel_id 和标志位可见 | 控制帧不含敏感数据；若需要可扩展 |

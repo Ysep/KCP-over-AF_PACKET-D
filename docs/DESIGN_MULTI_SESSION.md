@@ -53,8 +53,8 @@ client3 ──▶ accept ──▶ chan3 (KCP#3) ──▶ AF_PACKET    ← 新�
 `channel_id` 配置值仅用作 listener 标识。实际数据帧中传输的 `channel_id` 是动态分配的 ID。**配置 `channel_id` 不在数据帧中出现。**
 
 **`max_sessions` 默认值**：
-- `max_sessions` 未设置或为 0 → 默认 `1`（向后兼容单会话行为）
-- `max_sessions >= 2` → 启用多会话，每个新 accept 创建动态通道
+- `max_sessions` 未设置或为 0 → 默认 `1`（也使用动态通道，保持架构一致性）
+- `max_sessions >= 1` → 启用动态通道模式，每个新 accept 创建动态 INITIATOR 通道
 - `max_sessions <= 256`（每个 listener 的数据 ID 池为 256 个，不受 listener ID 占用）
 
 ```

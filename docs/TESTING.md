@@ -20,23 +20,29 @@ KCP-over-AF_PACKET 拥有 **80+ 项测试**，覆盖 4 个测试套件，全部�
 
 ### 测试套件矩阵
 
-| 套件 | 测试文件 | 测试数量（约） | 类型 | 依赖 |
-|------|---------|--------------|------|------|
-| 单元测试 | `tests/test_myproto.c` | ~29 项 | 白盒单元测试 | `libnettle` |
-| 集成测试 I | `tests/test_integration.c` | ~26 项 | 模块集成测试 | `libjson-c`、`libnettle` |
-| 集成测试 II | `tests/test_integration_v2.c` | ~20 项 | 扩展集成测试 | `libnettle` |
-| 对比测试 | `tests/test_comparison.c` | ~18 项 | 交叉验证测试 | `libnettle` |
+| 套件 | 测试文件 | 测试数量 | 类型 | 依赖 |
+|------|---------|----------|------|------|
+| 单元测试 | `tests/test_myproto.c` | 26 项 | MyProto 协议单元测试 | 无 |
+| 集成测试 I | `tests/test_integration.c` | 26 项 | 配置加载/验证/加密 | `libjson-c`、`libnettle` |
+| 集成测试 II | `tests/test_integration_v2.c` | 20 项 | 通道状态机 | 无 |
+| 集成测试 III | `tests/test_integration_v3.c` | 20 项 | KCP 集成测试 | 无 |
+| 集成测试 IV | `tests/test_integration_v4.c` | 10 项 | 加密管线 | `libnettle` |
+| 集成测试 V | `tests/test_integration_v5.c` | 100 项 | 全量回归测试 | 无 |
+| **合计** | | **210 项** | | |
 
 ### 测试覆盖范围
 
 ```
 模块覆盖:
-  myproto.c     ████████████████████  (29 单元 + 20 集成)
-  crypto.c      ████████████████████  (被 myproto 间接覆盖)
-  channel.c     ██████████████████    (26 + 20 集成)
-  kcp_wrap.c    ██████████████████    (26 + 20 集成)
+  myproto.c     ████████████████████  (26 单元 + 100 集成)
+  crypto.c      ████████████████████  (10 集成 + 被 myproto 间接覆盖)
+  channel.c     ██████████████████    (26 集成 + 20 状态机 + 100 回归)
+  kcp_wrap.c    ██████████████████    (20 集成 + 100 回归)
   ikcp.c        ██████████████████    (被 kcp_wrap 间接覆盖)
-  main.c        ████████████          (26 集成, 配置加载/验证)
+  main.c        ██████████████        (26 集成, 配置加载/验证/ACL)
+  proxy.c       ████████████          (26 集成, accept/ACL/连接)
+  af_packet.c   ██████████            (26 集成, 间接覆盖)
+  acl.c         ████████████          (26 集成, 嵌入 proxy_accept)
   proxy.c       ██████                (被集成测试间接覆盖)
   af_packet.c   ██████                (通过 stub 模拟)
 
@@ -65,7 +71,7 @@ sudo apt-get install -y build-essential gcc make libjson-c-dev nettle-dev
 ```bash
 cd /sandbox/workspace/kcp-afpacket-C
 
-# 一键运行所有测试（单元 + 集成 I + 集成 II）
+# 一键运行全量 210 项测试（单元 + 集成 I-V）
 make test
 ```
 
@@ -75,7 +81,7 @@ make test
 # 仅运行单元测试（MyProto 协议模块，~29 项）
 make test-unit
 
-# 仅运行集成测试 I（配置加载、KCP 生命周期、通道管理等，~26 项）
+# 仅运行集成测试 I（配置加载、ACL、加密等，26 项）
 make test-integ
 
 # 仅运行集成测试 II（扩展测试：协议层、状态机、边界、IPv6 等，~20 项）

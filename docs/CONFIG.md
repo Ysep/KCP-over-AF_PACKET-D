@@ -13,7 +13,7 @@
     "peer_mac":           "<string | "">",
     "local_mac":          "<string | "">",
     "kcp":                { <KCP config> },
-    "proxy_mode":         "forward" | "reverse",
+    "node_type":          "frontend" | "backend",
     "max_channels":       <int>,
     "heartbeat_interval": <int>,
     "heartbeat_timeout":  <int>,
@@ -175,21 +175,21 @@ KCP 内部定时器更新间隔。较小的值可降低延迟但增加 CPU 开�
 
 ---
 
-### 6. `proxy_mode`
+### 6. `node_type`
 
 | 属性 | 值 |
 |------|-----|
 | **类型** | `string` |
-| **默认值** | `"forward"` |
-| **可选值** | `"forward"`, `"reverse"` |
-| **示例** | `"forward"` |
+| **默认值** | `"frontend"` |
+| **可选值** | `"frontend"`, `"backend"` |
+| **示例** | `"frontend"` |
 
-代理工作模式：
+节点角色：
 
 | 模式 | 说明 | 通道角色 |
 |------|------|----------|
-| `"forward"` | **正向代理**：在本地监听端口，将应用数据通过 AF_PACKET 隧道转发到远端，远端再转发到目标服务。 | Initiator |
-| `"reverse"` | **反向代理**：从 AF_PACKET 接收对端请求，转发到本地运行的服务。 | Responder |
+| `"frontend"` | **前端节点**：在本地监听端口，将应用数据通过 AF_PACKET 隧道转发到后端，后端再转发到目标服务。 | Initiator |
+| `"backend"` | **后端节点**：从 AF_PACKET 接收对端请求，转发到本地运行的服务。 | Responder |
 
 ---
 
@@ -316,12 +316,12 @@ PID 文件路径。用于多实例部署和进程管理（如 systemd 的 `PIDFi
 
 | 属性 | 值 |
 |------|-----|
-| **类型** | `integer` (uint16) |
+| **类型** | `integer` (uint32) |
 | **必填** | 是 |
-| **范围** | `1` ~ `65535` |
+| **范围** | `1` ~ `65535`（静态）/ `65536` ~ `4294967295`（动态） |
 | **示例** | `1`, `100` |
 
-通道唯一标识符。在帧头部作为 `channel_id` 字段，用于多流复用中的帧路由。**同一配置文件中的所有通道 `channel_id` 必须唯一。** 对端配置中相同 `channel_id` 的通道将配对通信。
+通道唯一标识符。在帧头部作为 `channel_id` 字段（4 字节），用于多流复用中的帧路由。**同一配置文件中的所有通道 `channel_id` 必须唯一。** 对端配置中相同 `channel_id` 的通道将配对通信。
 
 #### 15.2 `listen_port`
 
@@ -375,6 +375,52 @@ PID 文件路径。用于多实例部署和进程管理（如 systemd 的 `PIDFi
 
 传输协议类型：`true` = TCP，`false` = UDP。
 
+#### 15.7 `max_sessions`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `integer` (uint16) |
+| **默认值** | `1` |
+| **范围** | `1` ~ `65535` |
+| **示例** | `1`, `5`, `32` |
+
+此端口允许的最大并发会话数。0 或 1 使用单会话动态通道模式；>1 启用多会话模式，每个 accept 创建一个独立的动态 INITIATOR 通道，共享同一 listener 的网络层信息。
+
+#### 15.8 `client_acl`（客户端访问控制）
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `object`（可选） |
+| **默认值** | 不配置 = 全部允许 |
+
+仅 TCP 通道生效。在 `proxy_accept` 时通过 `getpeername()` 获取客户端 IP/端口进行匹配。
+
+##### `ips` (string[], 最多 16 条)
+
+IP 规则列表，匹配任一即通过。支持三种格式：
+
+- `"10.0.0.5"` — 单个 IP
+- `"10.0.1.0/24"` — CIDR 网段
+- `"192.168.0.10-192.168.0.50"` — IP 范围（闭区间）
+
+##### `ports` (string[], 最多 8 条)
+
+端口规则列表，匹配任一即通过。支持两种格式：
+
+- `"8080"` — 单个端口
+- `"1024-65535"` — 端口范围（闭区间）
+
+##### 组合逻辑
+
+`ips` 和 `ports` 均为空 → 全部允许。均非空 → IP 和端口都需满足（AND）。仅一项非空 → 仅检查该项。
+
+```json
+"client_acl": {
+    "ips": ["10.0.0.0/8", "172.16.0.0/12"],
+    "ports": ["1024-65535"]
+}
+```
+
 ---
 
 ## 完整配置示例
@@ -394,7 +440,7 @@ PID 文件路径。用于多实例部署和进程管理（如 systemd 的 `PIDFi
         "resend": 2,
         "nc": 1
     },
-    "proxy_mode": "forward",
+    "node_type": "frontend",
     "max_channels": 128,
     "heartbeat_interval": 10,
     "heartbeat_timeout": 60,
@@ -459,7 +505,7 @@ PID 文件路径。用于多实例部署和进程管理（如 systemd 的 `PIDFi
 2. `ethertype` 必须 ≥ `0x0600`（排除 IEEE 802.3 保留范围）
 3. 若指定 `peer_mac`，格式必须为 `xx:xx:xx:xx:xx:xx`
 4. `kcp.mtu`, `kcp.sndwnd`, `kcp.rcvwnd` 均需 > 0
-5. `proxy_mode` 必须为 `"forward"` 或 `"reverse"`
+5. `node_type` 必须为 `"frontend"` 或 `"backend"`
 6. `max_channels` 必须在 `[1, 256]` 范围内
 7. 至少配置 1 个通道
 8. 所有通道 `channel_id` 必须 > 0 且唯一
