@@ -758,6 +758,7 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                          ch->local_fd, ch->channel_id);
                 proxy_close_local(ch);
                 channel_send_ctrl(ch, MPF_FIN);
+                ch->state = CHANNEL_FIN_SENT;
                 return 0;
             }
 
@@ -1381,16 +1382,11 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
     } else {
         /* ---- 本地连接套接字事件 ---- */
 
-        if (events & (EPOLLERR | EPOLLHUP)) {
-            LOG_ERROR("proxy_handle_event: error/hangup on local_fd=%d "
-                      "(channel=%u, events=0x%x)",
-                      fd, ch->channel_id, events);
-            proxy_close_local(ch);
-            channel_send_ctrl(ch, MPF_RST);
-            ch->state = CHANNEL_CLOSED;
-            return -1;
-        }
-
+        /*
+         * EPOLLIN 优先于 EPOLLHUP/EPOLLERR 处理：
+         * 当远端主动关闭时，内核同时置位 EPOLLIN|EPOLLHUP，
+         * 需先读取残留数据（或 EOF via read()==0），再关闭。
+         */
         if (events & EPOLLIN) {
             ret = proxy_handle_local_read(ctx, ch);
             if (ret < 0) {
@@ -1400,6 +1396,31 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
                 proxy_close_local(ch);
                 return -1;
             }
+        }
+
+        if (events & EPOLLERR) {
+            LOG_ERROR("proxy_handle_event: error on local_fd=%d "
+                      "(channel=%u, events=0x%x)",
+                      fd, ch->channel_id, events);
+            proxy_close_local(ch);
+            channel_send_ctrl(ch, MPF_RST);
+            ch->state = CHANNEL_CLOSED;
+            channel_destroy(ctx, ch);
+            return -1;
+        }
+
+        if (events & EPOLLHUP) {
+            LOG_INFO("proxy_handle_event: hangup on local_fd=%d "
+                     "(channel=%u, events=0x%x), graceful close",
+                     fd, ch->channel_id, events);
+            proxy_close_local(ch);
+            if (ch->state == CHANNEL_ESTABLISHED ||
+                ch->state == CHANNEL_SYN_SENT ||
+                ch->state == CHANNEL_SYN_RCVD) {
+                channel_send_ctrl(ch, MPF_FIN);
+                ch->state = CHANNEL_FIN_SENT;
+            }
+            return 0;
         }
 
         if (events & EPOLLOUT) {

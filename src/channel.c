@@ -1157,8 +1157,8 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
         /* 查找通道 */
         ch = channel_find(ctx, hdr->channel_id);
         if (!ch) {
-            LOG_ERROR("channel_process_frame: "
-                      "DATA for unknown channel %u, dropping",
+            LOG_DEBUG("channel_process_frame: "
+                      "late DATA for unknown channel %u, dropping",
                       hdr->channel_id);
             return -1;
         }
