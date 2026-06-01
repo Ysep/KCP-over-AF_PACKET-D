@@ -199,4 +199,4 @@ $(TEST_INTEG4_BIN): $(TEST_INTEG4_SRC)
 $(TEST_INTEG5_BIN): $(TEST_INTEG5_SRC)
 	@mkdir -p tests
 	@echo "  CC      $@"
-	$(CC) $(TEST_CFLAGS) -o $@ $(TEST_INTEG5_SRC) $(TEST_INTEG5_LIBS)
+	$(CC) $(TEST_CFLAGS) -mcmodel=medium -o $@ $(TEST_INTEG5_SRC) $(TEST_INTEG5_LIBS)

@@ -38,6 +38,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <arpa/inet.h>
 
 #include "types.h"
@@ -50,6 +51,22 @@
 
 /* 帧最小长度：MyProto 协议头（以太网头由 af_packet 层处理） */
 #define MYPROTO_MIN_FRAME_SIZE  (MYPROTO_HDR_SIZE)
+
+/* ============================================================================
+ * CRC-16/CCITT（帧头完整性校验）
+ * 多项式: 0x1021，初始值: 0x0000，无反射，无 XOR-out
+ * 覆盖 MyProto 帧头前 7 字节（channel_id + flags + payload_len）的线格式
+ * ============================================================================ */
+static uint16_t crc16_ccitt(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0x0000;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int b = 0; b < 8; b++)
+            crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
 
 /* ============================================================================
  * CRC32 实现
@@ -77,23 +94,20 @@ static void crc32_generate_table(uint32_t table[256])
 }
 
 /*
- * 获取 CRC32 查找表（惰性初始化，线程安全）。
+ * 获取 CRC32 查找表（惰性初始化，使用 pthread_once 确保线程安全）。
  */
+static pthread_once_t crc32_table_once = PTHREAD_ONCE_INIT;
+static uint32_t crc32_table[256];
+
+static void crc32_table_init(void)
+{
+    crc32_generate_table(crc32_table);
+}
+
 static const uint32_t *crc32_get_table(void)
 {
-    static uint32_t table[256];
-    static volatile int initialized = 0;
-
-    /*
-     * 双重检查锁定模式的简化版：使用 volatile 标志。
-     * 最坏情况：多个线程同时初始化，但 table 的内容是幂等的
-     * （相同输入总是产生相同输出），因此不会导致数据竞争问题。
-     */
-    if (!initialized) {
-        crc32_generate_table(table);
-        initialized = 1;
-    }
-    return table;
+    pthread_once(&crc32_table_once, crc32_table_init);
+    return crc32_table;
 }
 
 /*
@@ -193,11 +207,14 @@ ssize_t myproto_build_frame(uint8_t *buf, size_t buf_size,
     {
         uint32_t net_channel  = htonl(hdr->channel_id);
         uint16_t net_payload  = htons(hdr->payload_len);
-        uint16_t header_crc   = 0;  /* Reserved for future use */
+        uint16_t header_crc;
 
         memcpy(buf,     &net_channel,  4);
         buf[4] = hdr->flags;
         memcpy(buf + 5, &net_payload,  2);
+
+        /* CRC-16/CCITT over first 7 header bytes (wire format) */
+        header_crc = crc16_ccitt(buf, 7);
         memcpy(buf + 7, &header_crc,   2);
     }
 
@@ -257,15 +274,27 @@ int myproto_parse_frame(const uint8_t *data, size_t data_len,
     {
         uint32_t net_channel;
         uint16_t net_payload;
+        uint16_t wire_crc;
 
         memcpy(&net_channel, data,     4);
         hdr->flags       = data[4];
         memcpy(&net_payload, data + 5, 2);
-        /* bytes 7-8: header_crc (reserved, ignored on parse) */
+        memcpy(&wire_crc,   data + 7, 2);
 
         hdr->channel_id  = ntohl(net_channel);
         hdr->payload_len = ntohs(net_payload);
-        hdr->header_crc  = 0;  /* not validated on receive */
+
+        /* CRC-16/CCITT 帧头完整性校验 */
+        hdr->header_crc  = wire_crc;
+        {
+            uint16_t computed = crc16_ccitt(data, 7);
+            if (computed != wire_crc) {
+                LOG_ERROR("myproto_parse_frame: header CRC mismatch "
+                          "(expected 0x%04X, computed 0x%04X, ch=%u)",
+                          wire_crc, computed, hdr->channel_id);
+                return -1;
+            }
+        }
     }
 
     /* 验证协议头 */

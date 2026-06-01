@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 #include <nettle/sm4.h>
 #include <nettle/cbc.h>
 #include <nettle/hmac.h>
@@ -43,6 +44,7 @@ static struct sm4_ctx  g_enc_ctx;
 static struct sm4_ctx  g_dec_ctx;
 /** 全局加密开关：0=明文透传 / 1=加密模式 */
 static int             crypto_enabled = 0;
+static int             g_urandom_fd  = -1; /* /dev/urandom fd（启动时打开，复用） */
 /**
  * HMAC 密钥（32 字节），由 SM4 密钥通过 HMAC-SM3("KCP-HMAC", sm4_key) 派生。
  * 与 SM4 数据密钥分离：即使 CBC 密文被破解，攻击者无法直接获得 HMAC 密钥。
@@ -98,6 +100,14 @@ int crypto_init(const encryption_config_t *cfg)
     hmac_sm3_update(&hctx, 16, key_bin);
     hmac_sm3_digest(&hctx, SM3_DIGEST_SIZE, g_hmac_key);
 
+    /* 打开 /dev/urandom fd（复用，避免每帧 open/close） */
+    g_urandom_fd = open("/dev/urandom", O_RDONLY);
+    if (g_urandom_fd < 0) {
+        LOG_ERROR("crypto_init: cannot open /dev/urandom: %s", strerror(errno));
+        crypto_enabled = 0;
+        return -1;
+    }
+
     /* 擦除临时 key：防止通过 core dump / /proc/pid/mem 泄露 */
     memset(key_bin, 0, sizeof(key_bin));
     __asm__ __volatile__("" : : "r"(key_bin) : "memory");
@@ -123,6 +133,10 @@ void crypto_cleanup(void)
     memset(&g_dec_ctx, 0, sizeof(g_dec_ctx));
     memset(g_hmac_key, 0, sizeof(g_hmac_key));
     crypto_enabled = 0;
+    if (g_urandom_fd >= 0) {
+        close(g_urandom_fd);
+        g_urandom_fd = -1;
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -287,22 +301,16 @@ int crypto_encrypt_frame(const uint8_t *in, int in_len,
     int total = SM4_IV_LEN + max_ct + SM3_HMAC_LEN;
     if (total > out_cap) return -1;
 
-    /* 1. 生成随机 IV
-     *    使用 /dev/urandom 而非 rand()：
-     *      - rand() 种子可预测且周期短，不适合安全用途
-     *      - /dev/urandom 由内核熵池驱动，提供密码学质量的随机数
-     *    每次 open/read/close 保证即使多线程也不会共享 fd 偏移 */
+    /* 1. 生成随机 IV（通过复用 fd 从 /dev/urandom 读取） */
     uint8_t iv[SM4_IV_LEN];
     {
-        int fd = open("/dev/urandom", O_RDONLY);
-        if (fd < 0) return -1;
+        if (g_urandom_fd < 0) return -1;
         ssize_t total_read = 0;
         while (total_read < SM4_IV_LEN) {
-            ssize_t n = read(fd, iv + total_read, SM4_IV_LEN - total_read);
-            if (n <= 0) { close(fd); return -1; }
+            ssize_t n = read(g_urandom_fd, iv + total_read, SM4_IV_LEN - total_read);
+            if (n <= 0) return -1;
             total_read += n;
         }
-        close(fd);
     }
     memcpy(out, iv, SM4_IV_LEN);
 
@@ -359,11 +367,18 @@ int crypto_decrypt_frame(const uint8_t *in, int in_len,
 
     /* 1. 验证 HMAC — 在解密之前执行（Encrypt-then-MAC 的关键顺序）
      *    R1 审计修复：原实现先解密再验 MAC，存在 padding oracle 风险。
-     *    现改为先验证 HMAC，验证通过才执行解密。 */
+     *    现改为先验证 HMAC，验证通过才执行解密。
+     *    S2 审计修复：memcmp → 常量时间比较，防 timing side-channel */
     uint8_t mac_calc[SM3_HMAC_LEN];
     sm3_hmac_compute(in, SM4_IV_LEN + ct_len, mac_calc);
-    if (memcmp(mac_calc, in + SM4_IV_LEN + ct_len, SM3_HMAC_LEN) != 0)
-        return -1;  /* HMAC mismatch — 帧被篡改或密钥不匹配 */
+    {
+        /* 常量时间 MAC 比较：逐字节 OR 差异，避免短路退出 */
+        volatile uint8_t diff = 0;
+        for (int i = 0; i < SM3_HMAC_LEN; i++)
+            diff |= mac_calc[i] ^ in[SM4_IV_LEN + ct_len + i];
+        if (diff != 0)
+            return -1;  /* HMAC mismatch */
+    }
 
     /* 2. SM4-CBC 解密（先验证输出缓冲区足够）
      *    ct_len 在解密后可能会因 PKCS7 解填充缩短，不会超过 out_cap */

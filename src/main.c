@@ -717,6 +717,14 @@ int validate_config(const global_config_t *config)
             return -1;
         }
 
+        /* listen_addr 和 remote_addr 进行完整性提示 */
+        if (ch->listen_addr[0] == '\0')
+            LOG_WARN("Channel %d (id=%u): listen_addr is empty (will default to 0.0.0.0)",
+                     i, ch->channel_id);
+        if (ch->remote_addr[0] == '\0')
+            LOG_WARN("Channel %d (id=%u): remote_addr is empty",
+                     i, ch->channel_id);
+
         /* 检查 ID 唯一性 */
         for (int j = i + 1; j < config->channel_count; j++) {
             if (ch->channel_id == config->channels[j].channel_id) {

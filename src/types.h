@@ -564,6 +564,11 @@ typedef struct {
     /* 统计 */
     uint32_t        last_stats_time;    /* 上次统计输出时间 */
 
+    /* 速率限制（防 SYN flood）：每秒最多创建 N 个通道 */
+    uint32_t        channel_create_timestamp;  /* 当前秒的时间戳 */
+    uint32_t        channel_create_count;      /* 当前秒内创建计数 */
+    uint32_t        channel_create_max_per_sec; /* 每秒最大创建数，0=不限制 */
+
 } global_ctx_t;
 
 /* ============================================================================

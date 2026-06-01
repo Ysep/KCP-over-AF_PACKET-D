@@ -365,10 +365,10 @@ cleanup:
     return;
 }
 
-/* Test 8: Parse frame with corrupted header_crc field → still succeeds (reserved field) */
+/* Test 8: Parse frame with corrupted header_crc → rejected (CRC-16 validated) */
 static void test_myproto_parse_corrupted_header_crc(void)
 {
-    TEST("MyProto: parse frame with corrupted header_crc → succeeds (reserved)");
+    TEST("MyProto: parse frame with corrupted header_crc → rejected");
     uint8_t buf[256];
     myproto_hdr_t parsed_hdr;
     const uint8_t *payload = NULL;
@@ -381,14 +381,11 @@ static void test_myproto_parse_corrupted_header_crc(void)
     CHECK(len == MYPROTO_HDR_SIZE, "build ctrl should succeed");
 
     /* Corrupt header_crc bytes (buf[7] and buf[8]) */
-    buf[7] = 0xFF;
-    buf[8] = 0xFE;
+    buf[7] ^= 0xFF;
 
-    /* Parse should still succeed (header_crc is not validated on receive) */
+    /* Parse should FAIL (header_crc is now validated via CRC-16) */
     ret = myproto_parse_frame(buf, (size_t)len, &parsed_hdr, &payload, &payload_len);
-    CHECK(ret == 0, "parse should succeed even with corrupted header_crc");
-    CHECK(parsed_hdr.channel_id == 99, "channel_id should still be 99");
-    CHECK(parsed_hdr.flags == MPF_FIN, "flags should still be MPF_FIN");
+    CHECK(ret != 0, "parse should fail with corrupted header_crc");
 
     PASS();
     return;
@@ -523,24 +520,24 @@ cleanup:
 }
 
 /* Test 14: Verify header_crc is 0 in built frames (reserved field) */
-static void test_myproto_header_crc_zero(void)
+static void test_myproto_header_crc_valid(void)
 {
-    TEST("MyProto: header_crc is 0 in built frames (reserved)");
+    TEST("MyProto: header_crc is valid CRC-16 (S1 fix)");
     uint8_t buf[256];
     ssize_t len;
 
-    /* Build a ctrl frame and check bytes 7-8 are zero */
+    /* Build a ctrl frame: header_crc should be valid CRC-16 (non-zero) */
     len = myproto_build_ctrl_frame(buf, sizeof(buf), 1, MPF_SYN, 0);
     CHECK(len == MYPROTO_HDR_SIZE, "build should succeed");
-    CHECK(buf[7] == 0 && buf[8] == 0,
-          "header_crc bytes (7-8) should be 0 in built frame");
 
-    /* Build a data frame and check bytes 7-8 are zero */
-    len = myproto_build_data_frame(buf, sizeof(buf), 2, 0,
-                                   (const uint8_t *)"AB", 2, 0);
-    CHECK(len == MYPROTO_HDR_SIZE + 2, "data build should succeed");
-    CHECK(buf[7] == 0 && buf[8] == 0,
-          "header_crc bytes should be 0 in data frame too");
+    /* Verify the frame can be parsed back */
+    myproto_hdr_t hdr;
+    const uint8_t *payload = NULL;
+    size_t payload_len = 0;
+    int ret = myproto_parse_frame(buf, (size_t)len, &hdr, &payload, &payload_len);
+    CHECK(ret == 0, "parse should succeed with valid CRC-16");
+    CHECK(hdr.channel_id == 1, "channel_id preserved");
+    CHECK(hdr.flags == MPF_SYN, "flags preserved");
 
     PASS();
     return;
@@ -3385,7 +3382,7 @@ int main(void)
     test_myproto_roundtrip_ctrl();
     test_myproto_roundtrip_data();
     test_myproto_hdr_size();
-    test_myproto_header_crc_zero();
+    test_myproto_header_crc_valid();
     test_myproto_build_return_sizes();
 
     print_banner("Channel State Machine (Tests 16-30)");

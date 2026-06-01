@@ -336,6 +336,11 @@ int channel_init(global_ctx_t *ctx, int max_channels)
     /* 保存全局上下文指针 */
     g_ctx = ctx;
 
+    /* 默认速率限制: 每秒最多创建 1000 个通道（防 SYN flood） */
+    ctx->channel_create_max_per_sec = 1000;
+    ctx->channel_create_timestamp   = (uint32_t)time(NULL);
+    ctx->channel_create_count       = 0;
+
     /* 计算哈希表大小：max_channels * 2，限幅 [64, 65535] */
     hash_size = (uint32_t)max_channels * 2;
     if (hash_size < 64) hash_size = 64;
@@ -483,6 +488,21 @@ channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
         LOG_ERROR("channel_create: max channels reached (%d/%d)",
                   ctx->channel_count, ctx->config.max_channels);
         return NULL;
+    }
+
+    /* 速率限制：防 SYN flood */
+    if (ctx->channel_create_max_per_sec > 0) {
+        uint32_t now = (uint32_t)time(NULL);
+        if (now != ctx->channel_create_timestamp) {
+            ctx->channel_create_timestamp = now;
+            ctx->channel_create_count = 0;
+        }
+        if (ctx->channel_create_count >= ctx->channel_create_max_per_sec) {
+            LOG_ERROR("channel_create: rate limit exceeded (%u/sec)",
+                      ctx->channel_create_max_per_sec);
+            return NULL;
+        }
+        ctx->channel_create_count++;
     }
 
     /* 检查是否已存在同 ID 通道 */
