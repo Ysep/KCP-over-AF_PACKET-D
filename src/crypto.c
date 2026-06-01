@@ -77,6 +77,7 @@ int crypto_init(const encryption_config_t *cfg)
         unsigned int b;
         if (sscanf(cfg->sm4_key + i * 2, "%2x", &b) != 1) {
             LOG_ERROR("crypto_init: invalid hex key at position %d", i * 2);
+            crypto_enabled = 0;
             return -1;
         }
         key_bin[i] = (uint8_t)b;
@@ -85,6 +86,7 @@ int crypto_init(const encryption_config_t *cfg)
     if (cfg->sm4_key[32] != '\0') {
         LOG_ERROR("crypto_init: key must be exactly 32 hex characters");
         memset(key_bin, 0, sizeof(key_bin));
+        crypto_enabled = 0;
         return -1;
     }
 
