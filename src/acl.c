@@ -44,7 +44,7 @@ static int acl_port_match(uint16_t client_port, const acl_port_entry_t *entry)
 int acl_check(const channel_acl_t *acl,
               uint32_t client_ip, uint16_t client_port)
 {
-    if (!acl->enabled) return 1;
+    if (!acl || !acl->enabled) return 1;
 
     /* IP 白名单（OR 逻辑）：ip_count == 0 → 跳过 */
     if (acl->ip_count > 0) {
@@ -78,6 +78,8 @@ int acl_check(const channel_acl_t *acl,
 int extract_ip_port(const struct sockaddr_storage *ss,
                     uint32_t *ip_out, uint16_t *port_out)
 {
+    if (!ss || !ip_out || !port_out) return 0;
+
     if (ss->ss_family == AF_INET) {
         const struct sockaddr_in *in = (const struct sockaddr_in *)ss;
         *ip_out   = in->sin_addr.s_addr;         /* 网络字节序 */

@@ -291,6 +291,10 @@ static void parse_acl(json_object *obj, channel_acl_t *acl)
                     memcpy(addr_buf, str, len);
                     addr_buf[len] = '\0';
                     entry->addr = inet_addr(addr_buf);
+                } else {
+                    LOG_WARN("parse_acl: CIDR prefix too long (%zu chars), "
+                             "entry skipped", len);
+                    continue;
                 }
                 int prefix = atoi(slash + 1);
                 entry->mask_or_end = cidr_prefix_to_mask(prefix);
@@ -303,6 +307,10 @@ static void parse_acl(json_object *obj, channel_acl_t *acl)
                     memcpy(start_buf, str, len);
                     start_buf[len] = '\0';
                     entry->addr = inet_addr(start_buf);
+                } else {
+                    LOG_WARN("parse_acl: IP range start too long (%zu chars), "
+                             "entry skipped", len);
+                    continue;
                 }
                 entry->mask_or_end = inet_addr(dash + 1);
             } else {
@@ -339,10 +347,18 @@ static void parse_acl(json_object *obj, channel_acl_t *acl)
                 entry->type = ACL_PORT_RANGE;
                 entry->port_start = (uint16_t)atoi(str);
                 entry->port_end   = (uint16_t)atoi(dash + 1);
+                if (entry->port_start == 0 || entry->port_end == 0) {
+                    LOG_WARN("parse_acl: invalid port range, entry skipped");
+                    continue;
+                }
             } else {
                 /* SINGLE: "8080" */
                 entry->type = ACL_PORT_SINGLE;
                 entry->port_start = (uint16_t)atoi(str);
+                if (entry->port_start == 0) {
+                    LOG_WARN("parse_acl: invalid port, entry skipped");
+                    continue;
+                }
                 entry->port_end   = entry->port_start;
             }
             acl->port_count++;
@@ -837,7 +853,9 @@ static void cleanup(global_ctx_t *ctx)
 {
     if (ctx == NULL) return;
 
-    channel_close_all(ctx);
+    if (ctx->channel_hash) {
+        channel_close_all(ctx);
+    }
     /* Drain KCP buffers: allow in-flight data to flush during shutdown */
     {
         int drain_attempts;
@@ -947,7 +965,7 @@ static void config_reload_channels(global_ctx_t *ctx,
 
                 proxy_stop_listen(ctx, old_ch);
                 channel_update_config(old_ch, new_ch);
-                old_ch->listener_idx = (uint8_t)i;
+                old_ch->listener_idx = (uint16_t)i;
 
                 if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
                     if (proxy_start_listen(ctx, old_ch) != 0) {
@@ -959,7 +977,7 @@ static void config_reload_channels(global_ctx_t *ctx,
                 LOG_INFO("config_reload: channel %u updated", old_ch->channel_id);
             } else {
                 /* 无变更，仅更新 listener_idx */
-                old_ch->listener_idx = (uint8_t)i;
+                old_ch->listener_idx = (uint16_t)i;
             }
 
         } else if (new_ch->enabled) {
@@ -994,7 +1012,7 @@ static void config_reload_channels(global_ctx_t *ctx,
             memcpy(ch->peer_mac,  ctx->peer_mac,  ETH_MAC_ADDR_LEN);
             ch->ethertype = ctx->ethertype;
             ch->flags     = CH_FLAG_STATIC_LISTENER;
-            ch->listener_idx = (uint8_t)i;
+            ch->listener_idx = (uint16_t)i;
 
             if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
                 if (proxy_start_listen(ctx, ch) != 0) {
@@ -1027,7 +1045,11 @@ static void config_reload_channels(global_ctx_t *ctx,
     }
 
     /* Step 4: 刷新 channels[] 数组（保留 disabled 条目保持索引稳定） */
-    channel_config_t updated_channels[MAX_CHANNELS];
+    channel_config_t *updated_channels = calloc(MAX_CHANNELS, sizeof(channel_config_t));
+    if (!updated_channels) {
+        LOG_ERROR("config_reload_channels: failed to allocate updated_channels");
+        return;
+    }
     int updated_count = 0;
 
     for (int i = 0; i < new_cfg->channel_count; i++) {
@@ -1053,6 +1075,7 @@ static void config_reload_channels(global_ctx_t *ctx,
     ctx->config.channel_count = updated_count;
     memcpy(ctx->config.channels, updated_channels,
            (size_t)updated_count * sizeof(channel_config_t));
+    free(updated_channels);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -1233,7 +1256,7 @@ static int channel_ctl_add(global_ctx_t *ctx, const channel_config_t *cfg)
     memcpy(ch->peer_mac,  ctx->peer_mac,  ETH_MAC_ADDR_LEN);
     ch->ethertype = ctx->ethertype;
     ch->flags     = CH_FLAG_STATIC_LISTENER;
-    ch->listener_idx = (uint8_t)ctx->config.channel_count;
+    ch->listener_idx = (uint16_t)ctx->config.channel_count;
     if (ctx->config.node_type == NODE_TYPE_FRONTEND) {
         if (proxy_start_listen(ctx, ch) != 0) {
             ch->flags &= ~CH_FLAG_STATIC_LISTENER;
@@ -1452,6 +1475,7 @@ int main(int argc, char *argv[])
      * ================================================================ */
     if (setup_signals(g_ctx) != 0) {
         LOG_ERROR("Failed to setup signal handlers");
+        crypto_cleanup();
         return 1;
     }
 
@@ -1574,7 +1598,7 @@ int main(int argc, char *argv[])
 
         /* Listener 通道：设置防护标志，存储 array index（用于 alloc_channel_id） */
         ch->flags        = CH_FLAG_STATIC_LISTENER;
-        ch->listener_idx = (uint8_t)i;
+        ch->listener_idx = (uint16_t)i;
 
         /* 启动代理：frontend 节点监听本地端口 */
         if (g_ctx->config.node_type == NODE_TYPE_FRONTEND) {

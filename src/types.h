@@ -111,7 +111,7 @@
 #define SM3_HMAC_SIZE           32          /* SM3-HMAC 输出长度 */
 #define SM4_IV_LEN             SM4_IV_SIZE
 #define SM3_HMAC_LEN           SM3_HMAC_SIZE
-#define CRYPTO_OVERHEAD         (SM4_IV_SIZE + SM3_HMAC_SIZE) /* 加密总开销 */
+#define CRYPTO_OVERHEAD         (SM4_IV_SIZE + SM4_IV_SIZE + SM3_HMAC_SIZE) /* IV + PKCS7_max + HMAC = 64 */
 
 /* CRC32 */
 #define CRC32_SIZE              4           /* CRC32 校验值大小 */
@@ -458,7 +458,7 @@ typedef struct channel_s {
     channel_state_t state;              /* 当前状态 */
     channel_role_t  role;               /* 通道角色 */
     uint32_t        flags;              /* 标志位（CH_FLAG_STATIC_LISTENER / CH_FLAG_RELOAD_MARKED） */
-    uint8_t         listener_idx;       /* 在 config.channels[] 中的索引（指向父 listener 配置） */
+    uint16_t        listener_idx;       /* 在 config.channels[] 中的索引 */
 
     /* KCP 实例 */
     struct IKCPCB  *kcp;                /* KCP 控制块指针 */

@@ -875,7 +875,9 @@ int proxy_handle_local_write(channel_t *ch)
         ch->recv_buf_len -= (int)nwritten;
 
         /* Re-arm EPOLLOUT for remaining data (edge-triggered won't fire again) */
-        proxy_epoll_mod_events(g_ctx, ch->local_fd, ch, proxy_get_events(ch));
+        if (g_ctx) {
+            proxy_epoll_mod_events(g_ctx, ch->local_fd, ch, proxy_get_events(ch));
+        }
 
         LOG_DEBUG("proxy_handle_local_write: partial write %zd/%d bytes "
                   "on fd=%d (channel=%u)",

@@ -224,9 +224,14 @@ int kcp_wrap_recv(struct IKCPCB *kcp, uint8_t *buf, int size)
     }
 
     ret = ikcp_recv(kcp, (char *)buf, size);
-    if (ret < 0) {
-        /* ret < 0 表示没有完整的消息可读（EAGAIN 语义），这不是错误 */
+    if (ret == -1) {
+        /* -1 = 没有完整消息可读（EAGAIN 语义），这不是错误 */
         return 0;
+    }
+    if (ret < 0) {
+        /* -2 等 = 真实错误（缓冲区不足、校验失败等） */
+        LOG_ERROR("kcp_wrap_recv: ikcp_recv error %d (kcp=%p)", ret, (void *)kcp);
+        return -1;
     }
 
     return ret;

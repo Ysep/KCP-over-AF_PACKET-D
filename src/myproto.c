@@ -202,6 +202,11 @@ ssize_t myproto_build_frame(uint8_t *buf, size_t buf_size,
         return -1;
     }
 
+    if (buf_size < MYPROTO_HDR_SIZE) {
+        LOG_ERROR("myproto_build_frame: buffer too small (have %zu, need %u)",
+                  buf_size, MYPROTO_HDR_SIZE);
+        return -1;
+    }
     if (payload_len > buf_size - MYPROTO_HDR_SIZE) {
         LOG_ERROR("myproto_build_frame: buffer too small "
                   "(need %zu, have %zu)", MYPROTO_HDR_SIZE + payload_len, buf_size);
@@ -504,6 +509,13 @@ int myproto_process_data_frame(myproto_hdr_t *hdr,
     }
     decrypted_len = (size_t)ret;
 
+    /* 检查解密后长度不超过原始密文缓冲区 */
+    if (decrypted_len > *payload_len) {
+        LOG_ERROR("myproto_process_data_frame: decrypted length %zu exceeds "
+                  "payload buffer %zu", decrypted_len, *payload_len);
+        return -1;
+    }
+
     /* 将解密后的明文移回 payload 区域 */
     memmove(payload, decrypted_buf, decrypted_len);
     *payload_len = decrypted_len;
@@ -526,6 +538,11 @@ ssize_t myproto_append_crc(uint8_t *buf, size_t frame_len, size_t buf_size)
         return -1;
     }
 
+    if (buf_size < CRC32_SIZE) {
+        LOG_ERROR("myproto_append_crc: buffer too small (have %zu, need %u)",
+                  buf_size, CRC32_SIZE);
+        return -1;
+    }
     if (frame_len > buf_size - CRC32_SIZE) {
         LOG_ERROR("myproto_append_crc: buffer overflow "
                   "(frame_len=%zu + CRC=%u > buf_size=%zu)",
