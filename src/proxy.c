@@ -137,6 +137,7 @@ static int proxy_epoll_mod_events(global_ctx_t *ctx, int fd,
     struct epoll_event ev;
 
     (void)ptr;  /* 已改用 data.fd 存储 fd，ptr 保留兼容 */
+    memset(&ev, 0, sizeof(ev));
     ev.events   = events;
     ev.data.fd  = fd;
 
@@ -333,6 +334,7 @@ int proxy_start_listen(global_ctx_t *ctx, channel_t *ch)
          * 监听套接字使用 level-triggered (EPOLLIN)，
          * 确保不会因 edge-triggered 而在高并发下丢失连接。
          */
+        memset(&ev, 0, sizeof(ev));
         ev.events   = EPOLLIN;
         ev.data.fd  = fd;
         if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
@@ -684,6 +686,7 @@ int proxy_connect_remote(channel_t *ch)
      * 包含 EPOLLOUT：backend连接建立后，通过 EPOLLOUT 事件确认连接就绪。
      * 对于 TCP，connect 返回 EINPROGRESS 时，连接完成表现为套接字可写。
      */
+    memset(&ev, 0, sizeof(ev));
     ev.events   = EPOLLIN | EPOLLOUT | EPOLLET;
     ev.data.fd  = fd;
     if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, fd, &ev) < 0) {
@@ -1324,6 +1327,11 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
 
     if (fd < 0) {
         LOG_ERROR("proxy_handle_event: invalid fd %d", fd);
+        /*
+         * 尝试从 epoll 中删除坏 fd，防止无限循环。
+         * epoll_ctl(DEL) 对无效 fd 会返回 EBADF，安全无害。
+         */
+        epoll_ctl(ctx->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
         return -1;
     }
 
@@ -1445,6 +1453,7 @@ int proxy_epoll_add(global_ctx_t *ctx, int fd, void *ptr)
      * EPOLLET:  边缘触发模式（高性能，避免重复通知）
      * data.fd = fd:  存储 fd，main.c 通过 data.fd 获取触发源。
      */
+    memset(&ev, 0, sizeof(ev));
     ev.events   = EPOLLIN | EPOLLET;
     ev.data.fd  = fd;
 

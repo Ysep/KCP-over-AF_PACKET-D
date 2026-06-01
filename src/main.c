@@ -1651,6 +1651,7 @@ int main(int argc, char *argv[])
         struct epoll_event events[EPOLL_MAX_EVENTS];
 
         while (g_ctx->running) {
+            memset(events, 0, sizeof(events));  /* 清零防止栈残留数据 */
             int nfds = epoll_wait(g_ctx->epoll_fd, events, EPOLL_MAX_EVENTS, EPOLL_TIMEOUT_MS);
 
             if (nfds < 0) {
