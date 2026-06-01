@@ -241,7 +241,7 @@ int af_packet_set_bpf(int sock, uint16_t ethertype)
     struct sock_filter bpf_code[] = {
         /* 000 */ BPF_STMT(BPF_LD  | BPF_H   | BPF_ABS, 12),
         /* 001 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                           ntohs(ethertype), 0, 1),
+                           ntohs(ethertype), 1, 0),
         /* 002 */ BPF_STMT(BPF_RET | BPF_K, 0),
         /* 003 */ BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFF),
     };
