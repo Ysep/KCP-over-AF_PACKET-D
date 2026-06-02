@@ -169,6 +169,47 @@ static int proxy_ensure_epollout(global_ctx_t *ctx, channel_t *ch)
     return proxy_epoll_mod_events(ctx, ch->local_fd, ch, events);
 }
 
+static int proxy_ensure_recv_buf(channel_t *ch, int needed)
+{
+    int      new_cap;
+    uint8_t *new_buf;
+
+    if (!ch || needed < 0) {
+        return -1;
+    }
+
+    if (needed <= ch->recv_buf_cap) {
+        return 0;
+    }
+
+    if (needed > CHANNEL_RECV_BUF_MAX) {
+        LOG_ERROR("proxy_ensure_recv_buf: pending buffer too large "
+                  "(channel=%u, needed=%d, max=%d)",
+                  ch->channel_id, needed, CHANNEL_RECV_BUF_MAX);
+        return -1;
+    }
+
+    new_cap = ch->recv_buf_cap > 0 ? ch->recv_buf_cap : CHANNEL_RECV_BUF_SIZE;
+    while (new_cap < needed) {
+        if (new_cap > CHANNEL_RECV_BUF_MAX / 2) {
+            new_cap = CHANNEL_RECV_BUF_MAX;
+        } else {
+            new_cap *= 2;
+        }
+    }
+
+    new_buf = realloc(ch->recv_buf, (size_t)new_cap);
+    if (!new_buf) {
+        LOG_ERROR("proxy_ensure_recv_buf: realloc(%d) failed (channel=%u)",
+                  new_cap, ch->channel_id);
+        return -1;
+    }
+
+    ch->recv_buf = new_buf;
+    ch->recv_buf_cap = new_cap;
+    return 0;
+}
+
 /* ============================================================================
  * 公共 API 实现
  * ============================================================================ */
@@ -875,6 +916,14 @@ int proxy_handle_local_write(channel_t *ch)
         return 0;
     }
 
+    if (!ch->recv_buf) {
+        LOG_ERROR("proxy_handle_local_write: recv_buf missing "
+                  "(channel=%u, pending=%d)",
+                  ch->channel_id, ch->recv_buf_len);
+        ch->recv_buf_len = 0;
+        return -1;
+    }
+
     nwritten = write(ch->local_fd, ch->recv_buf, (size_t)ch->recv_buf_len);
     if (nwritten < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -1001,7 +1050,6 @@ int proxy_flush_to_local(channel_t *ch)
 int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
 {
     ssize_t nwritten;
-    int     remaining_space;
 
     if (!ch || !data) {
         LOG_ERROR("proxy_write_to_local: null pointer");
@@ -1023,12 +1071,11 @@ int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
      * 这样可以保证数据顺序，避免新数据在旧数据之前发送。
      */
     if (ch->recv_buf_len > 0) {
-        remaining_space = CHANNEL_RECV_BUF_SIZE - ch->recv_buf_len;
-        if (len > remaining_space) {
+        if (proxy_ensure_recv_buf(ch, ch->recv_buf_len + len) < 0) {
             LOG_ERROR("proxy_write_to_local: recv_buf overflow "
                       "(channel=%u, pending=%d, new=%d, capacity=%d)",
                       ch->channel_id, ch->recv_buf_len, len,
-                      CHANNEL_RECV_BUF_SIZE);
+                      ch->recv_buf_cap);
             return -1;
         }
 
@@ -1066,10 +1113,10 @@ int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
              * 套接字写缓冲区满：将数据全部缓冲到 recv_buf，
              * 等待 EPOLLOUT 事件触发重试。
              */
-            if (len > CHANNEL_RECV_BUF_SIZE) {
+            if (proxy_ensure_recv_buf(ch, len) < 0) {
                 LOG_ERROR("proxy_write_to_local: data too large for recv_buf "
                           "(channel=%u, len=%d, capacity=%d)",
-                          ch->channel_id, len, CHANNEL_RECV_BUF_SIZE);
+                          ch->channel_id, len, ch->recv_buf_cap);
                 return -1;
             }
             memcpy(ch->recv_buf, data, (size_t)len);
@@ -1091,10 +1138,10 @@ int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
 
         if (errno == EINTR) {
             /* 被信号中断，尝试缓冲 */
-            if (len > CHANNEL_RECV_BUF_SIZE) {
+            if (proxy_ensure_recv_buf(ch, len) < 0) {
                 LOG_ERROR("proxy_write_to_local: data too large for recv_buf "
-                          "(channel=%u, len=%d)",
-                          ch->channel_id, len);
+                          "(channel=%u, len=%d, capacity=%d)",
+                          ch->channel_id, len, ch->recv_buf_cap);
                 return -1;
             }
             memcpy(ch->recv_buf, data, (size_t)len);
@@ -1114,10 +1161,10 @@ int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
          * 这在非阻塞 TCP 套接字上可能发生，尽管较少见。
          */
         int remaining = len - (int)nwritten;
-        if (remaining > CHANNEL_RECV_BUF_SIZE) {
+        if (proxy_ensure_recv_buf(ch, remaining) < 0) {
             LOG_ERROR("proxy_write_to_local: remaining data too large "
                       "(channel=%u, remaining=%d, capacity=%d)",
-                      ch->channel_id, remaining, CHANNEL_RECV_BUF_SIZE);
+                      ch->channel_id, remaining, ch->recv_buf_cap);
             return -1;
         }
         memcpy(ch->recv_buf, data + nwritten, (size_t)remaining);
@@ -1200,6 +1247,9 @@ void proxy_close_local(channel_t *ch)
 
     /* 清空接收缓冲区 */
     ch->recv_buf_len = 0;
+    ch->recv_buf_cap = 0;
+    free(ch->recv_buf);
+    ch->recv_buf = NULL;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────

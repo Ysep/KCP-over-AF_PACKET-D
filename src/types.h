@@ -95,7 +95,8 @@
 /* Channel 常量 */
 #define MAX_CHANNELS            65536       /* 最大通道配置数 */
 #define CHANNEL_HASH_SIZE_DEFAULT 1024      /* 默认哈希表大小 */
-#define CHANNEL_RECV_BUF_SIZE   8192        /* socket 写阻塞时的待发送缓冲区大小 */
+#define CHANNEL_RECV_BUF_SIZE   8192        /* socket 写阻塞待发送缓冲区初始大小 */
+#define CHANNEL_RECV_BUF_MAX    (1024 * 1024) /* socket 写阻塞待发送缓冲区上限 */
 #define KCP_APP_RECV_BUF_SIZE   (64 * 1024) /* KCP 单条应用消息接收缓冲区大小 */
 #define CHANNEL_ID_STATIC_MIN   1           /* 静态通道 ID 最小值 */
 #define HEARTBEAT_CH_ID         0xFFFFFFFF  /* 全局心跳通道ID */
@@ -490,8 +491,9 @@ typedef struct channel_s {
     uint32_t        syn_sent_at;        /* SYN 发送时间 */
 
     /* 缓冲区 */
-    uint8_t         recv_buf[CHANNEL_RECV_BUF_SIZE]; /* KCP→socket 接收缓冲 */
+    uint8_t        *recv_buf;           /* KCP→socket 待发送缓冲（按需分配） */
     int             recv_buf_len;       /* 接收缓冲区有效数据长度 */
+    int             recv_buf_cap;       /* 接收缓冲区容量 */
 
     /* 流控 */
     int             paused;             /* 背压标志：1=暂停接收本地数据 */

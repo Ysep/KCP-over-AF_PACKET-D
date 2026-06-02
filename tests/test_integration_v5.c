@@ -3128,10 +3128,10 @@ cleanup:
     return;
 }
 
-/* Test 95: recv_buf capacity: CHANNEL_RECV_BUF_SIZE check */
+/* Test 95: recv_buf is allocated on demand */
 static void test_recv_buf_capacity(void)
 {
-    TEST("recv_buf capacity equals CHANNEL_RECV_BUF_SIZE");
+    TEST("recv_buf starts empty and is allocated on demand");
     static global_ctx_t ctx;
     channel_t *ch;
 
@@ -3141,9 +3141,9 @@ static void test_recv_buf_capacity(void)
                         8080, 9090, "0.0.0.0", "10.0.0.1", 1);
     CHECK(ch != NULL, "channel_create failed");
 
-    CHECK(sizeof(ch->recv_buf) == CHANNEL_RECV_BUF_SIZE,
-          "recv_buf size must equal CHANNEL_RECV_BUF_SIZE (8192)");
+    CHECK(ch->recv_buf == NULL, "initial recv_buf pointer must be NULL");
     CHECK(ch->recv_buf_len == 0, "initial recv_buf_len must be 0");
+    CHECK(ch->recv_buf_cap == 0, "initial recv_buf_cap must be 0");
 
     channel_shutdown(&ctx);
     PASS();

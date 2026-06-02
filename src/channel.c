@@ -562,7 +562,9 @@ channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
     ch->syn_sent_at    = 0;
 
     /* ---- 初始化缓冲区 ---- */
+    ch->recv_buf     = NULL;
     ch->recv_buf_len = 0;
+    ch->recv_buf_cap = 0;
 
     /* ---- 初始化流控 ---- */
     ch->paused = 0;
@@ -728,6 +730,13 @@ void channel_destroy(global_ctx_t *ctx, channel_t *ch)
     if (ch->local_fd >= 0) {
         proxy_close_local(ch);
         ch->local_fd = -1;
+    }
+
+    if (ch->recv_buf) {
+        free(ch->recv_buf);
+        ch->recv_buf = NULL;
+        ch->recv_buf_len = 0;
+        ch->recv_buf_cap = 0;
     }
 
     /* 关闭监听套接字（TCP/UDP 使用 close()，非 af_packet_close()）。
