@@ -1255,7 +1255,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
          * KCP 可能通过多次 recv 调用交付多个完整消息。
          */
         {
-            uint8_t kcp_buf[CHANNEL_RECV_BUF_SIZE];
+            uint8_t kcp_buf[KCP_APP_RECV_BUF_SIZE];
             int     kcp_recv_len;
 
             while ((kcp_recv_len = kcp_wrap_recv(ch->kcp, kcp_buf,
@@ -1380,9 +1380,16 @@ int channel_send_data(channel_t *ch, const uint8_t *data, size_t len)
         return 0;
     }
 
-    /* 检查通道状态 */
-    if (ch->state != CHANNEL_ESTABLISHED) {
-        LOG_ERROR("channel_send_data: channel %u not ESTABLISHED (state=%d)",
+    /*
+     * 握手期允许排队数据：
+     * - INITIATOR 在 SYN_SENT 时可能已经读到本地客户端首包（如 SSH banner）
+     * - RESPONDER 在 SYN_RCVD 时可能已经读到后端服务首包
+     * KCP 会负责可靠发送，控制面的 ACK/首个对端 DATA 会完成状态推进。
+     */
+    if (ch->state != CHANNEL_ESTABLISHED &&
+        ch->state != CHANNEL_SYN_SENT &&
+        ch->state != CHANNEL_SYN_RCVD) {
+        LOG_ERROR("channel_send_data: channel %u cannot send data in state=%d",
                   ch->channel_id, ch->state);
         return -1;
     }
