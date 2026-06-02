@@ -163,3 +163,39 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 支持本地写缓冲按需扩容
+
+Commit: `4e54e75`
+
+### 背景
+
+iperf3 高吞吐测试中，服务器 C 向本地 iperf3 server 写入数据时出现：
+
+- `proxy_write_to_local: recv_buf overflow (channel=65539, pending=376, new=65536, capacity=8192)`
+- `proxy_write_to_local: remaining data too large (channel=65543, remaining=8688, capacity=8192)`
+
+### 根因
+
+`proxy_write_to_local()` 使用固定 8 KiB 的 `recv_buf` 保存非阻塞 socket 的待写数据。iperf3 下 KCP 单条应用消息可达 64 KiB，本地 TCP 写缓冲一旦短暂阻塞或部分写入，剩余数据很容易超过 8 KiB，原逻辑会把可恢复的写阻塞误判为本地连接丢失。
+
+### 变更
+
+- `channel_t.recv_buf` 从固定数组改为按需分配指针。
+- 新增 `recv_buf_cap` 记录当前容量，初始不分配，按 `CHANNEL_RECV_BUF_SIZE` 起步扩容。
+- 新增 `CHANNEL_RECV_BUF_MAX`，限制单通道待写缓冲最大 1 MiB。
+- `proxy_write_to_local()` 在追加、EAGAIN/EINTR、部分写入路径中按需扩容，不再因 64 KiB 数据块直接溢出。
+- `proxy_close_local()` 和 `channel_destroy()` 释放动态缓冲。
+- 更新测试用例，确认缓冲区初始为空并按需分配。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
