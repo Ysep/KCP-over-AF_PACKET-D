@@ -103,6 +103,25 @@ static global_ctx_t *g_ctx = NULL;
 /* ============================================================================
  * 内部辅助函数（前向声明）
  * ============================================================================ */
+static int proxy_close_read_side(global_ctx_t *ctx, channel_t *ch,
+                                 const char *reason)
+{
+    if (!ch) {
+        return PROXY_LOCAL_READ_CLOSED;
+    }
+
+    LOG_INFO("proxy_handle_local_read: %s (channel=%u), closing session",
+             reason ? reason : "local read side closed", ch->channel_id);
+
+    proxy_close_local(ch);
+    channel_send_ctrl(ch, MPF_RST);
+    ch->state = CHANNEL_CLOSED;
+    if (ctx && !(ch->flags & CH_FLAG_STATIC_LISTENER)) {
+        channel_destroy(ctx, ch);
+    }
+
+    return PROXY_LOCAL_READ_CLOSED;
+}
 
 /*
  * 查找 local_fd 或 listen_fd 匹配的通道。
@@ -800,13 +819,8 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                     LOG_WARN("proxy_handle_local_read: channel_send_data "
                              "failed (channel=%u, len=%zd), closing session",
                              ch->channel_id, n);
-                    proxy_close_local(ch);
-                    channel_send_ctrl(ch, MPF_RST);
-                    ch->state = CHANNEL_CLOSED;
-                    if (!(ch->flags & CH_FLAG_STATIC_LISTENER)) {
-                        channel_destroy(ctx, ch);
-                    }
-                    return PROXY_LOCAL_READ_CLOSED;
+                    return proxy_close_read_side(ctx, ch,
+                                                 "channel_send_data failed");
                 }
                 continue;
             }
@@ -834,23 +848,14 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
             }
 
             if (errno == ECONNRESET) {
-                LOG_INFO("proxy_handle_local_read: connection reset by peer "
-                         "on fd=%d (channel=%u), closing session",
-                         ch->local_fd, ch->channel_id);
-                proxy_close_local(ch);
-                channel_send_ctrl(ch, MPF_RST);
-                ch->state = CHANNEL_CLOSED;
-                if (!(ch->flags & CH_FLAG_STATIC_LISTENER)) {
-                    channel_destroy(ctx, ch);
-                }
-                return PROXY_LOCAL_READ_CLOSED;
+                return proxy_close_read_side(ctx, ch,
+                                             "connection reset by peer");
             }
 
-            /* 真正的读取错误 */
-            LOG_ERROR("proxy_handle_local_read: read(fd=%d) failed: %s "
-                      "(channel=%u)",
-                      ch->local_fd, strerror(errno), ch->channel_id);
-            return -1;
+            LOG_INFO("proxy_handle_local_read: read(fd=%d) ended with %s "
+                     "(channel=%u), treating as local close",
+                     ch->local_fd, strerror(errno), ch->channel_id);
+            return proxy_close_read_side(ctx, ch, "local read error");
         }
     } else {
         /*
@@ -886,10 +891,11 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
 
             /* 将数据报送入 KCP */
             if (channel_send_data(ch, buf, (size_t)n) < 0) {
-                LOG_ERROR("proxy_handle_local_read: channel_send_data "
-                          "failed (channel=%u, len=%zd)",
-                          ch->channel_id, n);
-                return -1;
+                LOG_WARN("proxy_handle_local_read: channel_send_data "
+                         "failed (channel=%u, len=%zd), closing session",
+                         ch->channel_id, n);
+                return proxy_close_read_side(ctx, ch,
+                                             "channel_send_data failed");
             }
         }
     }
@@ -1486,11 +1492,16 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
                 return 0;
             }
             if (ret < 0) {
-                LOG_ERROR("proxy_handle_event: proxy_handle_local_read "
-                          "failed (channel=%u, fd=%d)",
-                          ch->channel_id, fd);
+                LOG_WARN("proxy_handle_event: proxy_handle_local_read "
+                         "returned %d (channel=%u, fd=%d), closing session",
+                         ret, ch->channel_id, fd);
                 proxy_close_local(ch);
-                return -1;
+                channel_send_ctrl(ch, MPF_RST);
+                ch->state = CHANNEL_CLOSED;
+                if (!(ch->flags & CH_FLAG_STATIC_LISTENER)) {
+                    channel_destroy(ctx, ch);
+                }
+                return 0;
             }
         }
 
