@@ -918,10 +918,11 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 }
 
                 /* Set up local socket for the new responder channel.
-                 * Frontend proxy: responder connects to remote service.
-                 * Backend proxy: responder listens for local clients. */
-                if (g_ctx && g_ctx->config.node_type == NODE_TYPE_FRONTEND) {
-                    /* Frontend: connect to remote_addr:remote_port */
+                 *
+                 *   Backend:  RESPONDER connects to remote service (D:22).
+                 *   Frontend: RESPONDER listens for local clients (after backend-initiated SYN). */
+                if (g_ctx && g_ctx->config.node_type == NODE_TYPE_BACKEND) {
+                    /* Backend: connect to remote_addr:remote_port */
                     if (proxy_connect_remote(ch) >= 0) {
                         channel_send_ctrl(ch, MPF_ACK);
                     } else {
@@ -931,7 +932,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                         return -1;
                     }
                 } else if (g_ctx) {
-                    /* Backend: start listening for local clients */
+                    /* Frontend: start listening for local clients */
                     if (proxy_start_listen(g_ctx, ch) < 0) {
                         LOG_ERROR("Failed to start listen for "
                                   "dynamic channel %u", ch->channel_id);
