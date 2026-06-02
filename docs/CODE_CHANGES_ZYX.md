@@ -199,3 +199,38 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 优化本地关闭收尾处理
+
+Commit: `c0842ac`
+
+### 背景
+
+连续执行 iperf3 时，两端出现不同的收尾错误：
+
+- C：`proxy_write_to_local: write/sendto(fd=6) failed: Connection reset by peer`
+- C：`channel_process_frame: proxy_write_to_local failed ... local connection lost`
+- C：旧通道在 `FIN_SENT` 中等待到 heartbeat timeout 后被记录为错误。
+
+### 根因
+
+本地 iperf3 server 在测试结束或异常收尾时可能主动 reset 某个连接。该场景应视为本地连接已关闭，而不是隧道错误。同时，`FIN_SENT` 已经处于关闭流程，不应继续使用 heartbeat timeout 作为错误路径；如果等不到对端 FIN，应按优雅关闭超时清理。
+
+### 变更
+
+- `proxy_write_to_local()` 将 `ECONNRESET`/`EPIPE` 降级为 `INFO`，返回 `PROXY_WRITE_LOCAL_CLOSED`。
+- `channel_process_frame()` 收到 `PROXY_WRITE_LOCAL_CLOSED` 后发送 RST、销毁动态通道，避免继续处理已关闭的本地连接。
+- `FIN_SENT` 从 heartbeat timeout 检查中移除，改用 `CHANNEL_GRACEFUL_TIMEOUT` 后清理。
+- 所有进入 `FIN_SENT` 的主要路径更新 `last_active`，保证关闭超时基于进入关闭状态的时间计算。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
