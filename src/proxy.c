@@ -734,6 +734,16 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
         return -1;
     }
 
+    if (ch->state == CHANNEL_FIN_SENT ||
+        ch->state == CHANNEL_FIN_RCVD ||
+        ch->state == CHANNEL_TIME_WAIT ||
+        ch->state == CHANNEL_CLOSED) {
+        LOG_DEBUG("proxy_handle_local_read: closing late local read on "
+                  "channel %u in state=%d", ch->channel_id, ch->state);
+        proxy_close_local(ch);
+        return 0;
+    }
+
     if (ch->is_tcp) {
         /*
          * TCP edge-triggered 模式：在循环中读取直到 EAGAIN。

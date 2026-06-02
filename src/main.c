@@ -94,7 +94,7 @@
 #define EPOLL_MAX_EVENTS    64
 #define EPOLL_TIMEOUT_MS    10
 #define PERIODIC_INTERVAL_MS 10
-#define MAX_FRAMES_PER_CYCLE 64
+#define MAX_FRAMES_PER_CYCLE 1024
 #define STATS_INTERVAL_SEC  60
 
 /* ---- 全局上下文指针（信号处理器需要访问） ---- */

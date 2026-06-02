@@ -1262,6 +1262,17 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                                                   (int)sizeof(kcp_buf))) > 0) {
                 int write_ret;
 
+                if (ch->local_fd < 0 &&
+                    (ch->state == CHANNEL_FIN_SENT ||
+                     ch->state == CHANNEL_FIN_RCVD ||
+                     ch->state == CHANNEL_TIME_WAIT ||
+                     ch->state == CHANNEL_CLOSED)) {
+                    LOG_DEBUG("channel_process_frame: dropping late data "
+                              "for closing channel %u (state=%d, len=%d)",
+                              hdr->channel_id, ch->state, kcp_recv_len);
+                    continue;
+                }
+
                 write_ret = proxy_write_to_local(ch, kcp_buf, kcp_recv_len);
                 if (write_ret < 0) {
                     LOG_ERROR("channel_process_frame: "
