@@ -797,10 +797,16 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
 
                 /* 将数据送入 KCP */
                 if (channel_send_data(ch, buf, (size_t)n) < 0) {
-                    LOG_ERROR("proxy_handle_local_read: channel_send_data "
-                              "failed (channel=%u, len=%zd)",
-                              ch->channel_id, n);
-                    return -1;
+                    LOG_WARN("proxy_handle_local_read: channel_send_data "
+                             "failed (channel=%u, len=%zd), closing session",
+                             ch->channel_id, n);
+                    proxy_close_local(ch);
+                    channel_send_ctrl(ch, MPF_RST);
+                    ch->state = CHANNEL_CLOSED;
+                    if (!(ch->flags & CH_FLAG_STATIC_LISTENER)) {
+                        channel_destroy(ctx, ch);
+                    }
+                    return PROXY_LOCAL_READ_CLOSED;
                 }
                 continue;
             }
@@ -1425,8 +1431,9 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
     /* 查找 fd 对应的通道 */
     ch = proxy_find_channel_by_fd(ctx, fd);
     if (!ch) {
-        LOG_WARN("proxy_handle_event: no channel found for fd=%d", fd);
-        return -1;
+        LOG_DEBUG("proxy_handle_event: stale event for fd=%d without channel",
+                  fd);
+        return 0;
     }
 
     /*
