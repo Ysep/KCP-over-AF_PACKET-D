@@ -224,12 +224,16 @@ int kcp_wrap_recv(struct IKCPCB *kcp, uint8_t *buf, int size)
     }
 
     ret = ikcp_recv(kcp, (char *)buf, size);
-    if (ret == -1) {
-        /* -1 = 没有完整消息可读（EAGAIN 语义），这不是错误 */
+    if (ret == -1 || ret == -2) {
+        /*
+         * -1 = 接收队列为空
+         * -2 = 队首 KCP 分片链尚未收齐，暂时没有完整应用消息
+         * 二者都是 EAGAIN 语义，不是协议错误。
+         */
         return 0;
     }
     if (ret < 0) {
-        /* -2 等 = 真实错误（缓冲区不足、校验失败等） */
+        /* -3 等 = 真实错误（例如应用缓冲区不足） */
         LOG_ERROR("kcp_wrap_recv: ikcp_recv error %d (kcp=%p)", ret, (void *)kcp);
         return -1;
     }

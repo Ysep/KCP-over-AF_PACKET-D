@@ -8,3 +8,11 @@ tests/test_comparison
 *.swo
 *~
 .vscode/
+#-------------------------
+#zyx添加忽略文件/目录
+scp_to_198-199.sh
+.agents
+.codex
+docs/CODE_CHANGES.md
+tests
+#-------------------------
