@@ -99,3 +99,33 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 提高 SSH 样例并发会话数
+
+Commit: `0ad3749`
+
+### 背景
+
+服务器 A 保持一个 SSH 登录不断开时，再打开第二个 SSH 登录失败，服务器 B 出现：
+
+- `proxy_accept: channel ID exhausted for listener 1`
+
+### 根因
+
+`max_sessions` 决定每个 listener 的动态通道 ID 池大小。B/C 样例配置没有显式配置 `max_sessions`，默认值为 1，因此同一 `:55222` listener 只允许 1 个并发 SSH 会话。第一个会话未断开时，第二个 accept 无可用动态 ID。
+
+### 变更
+
+- `sample/config-node-b.json` 为 SSH listener 增加 `"max_sessions": 256`。
+- `sample/config-node-c.json` 为对应 listener 增加 `"max_sessions": 256`。
+- 两端必须保持一致，否则 backend 无法按动态 ID 区间反查到正确 listener 配置。
+
+### 验证
+
+已执行：
+
+```bash
+make test
+```
+
+结果：全部通过。
