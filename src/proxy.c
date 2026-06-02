@@ -813,6 +813,7 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                 proxy_close_local(ch);
                 channel_send_ctrl(ch, MPF_FIN);
                 ch->state = CHANNEL_FIN_SENT;
+                ch->last_active = time_now();
                 return 0;
             }
 
@@ -1147,6 +1148,13 @@ int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len)
             memcpy(ch->recv_buf, data, (size_t)len);
             ch->recv_buf_len = len;
             return 0;
+        }
+
+        if (errno == ECONNRESET || errno == EPIPE) {
+            LOG_INFO("proxy_write_to_local: local peer closed fd=%d "
+                     "(channel=%u): %s",
+                     ch->local_fd, ch->channel_id, strerror(errno));
+            return PROXY_WRITE_LOCAL_CLOSED;
         }
 
         LOG_ERROR("proxy_write_to_local: write/sendto(fd=%d) failed: %s "
@@ -1500,6 +1508,7 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
                 ch->state == CHANNEL_SYN_RCVD) {
                 channel_send_ctrl(ch, MPF_FIN);
                 ch->state = CHANNEL_FIN_SENT;
+                ch->last_active = time_now();
             }
             return 0;
         }

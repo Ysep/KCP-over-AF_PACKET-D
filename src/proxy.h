@@ -10,6 +10,8 @@
 
 #include "types.h"
 
+#define PROXY_WRITE_LOCAL_CLOSED (-2)
+
 /* ============================================================================
  * 函数声明
  * ============================================================================ */
@@ -77,7 +79,8 @@ int proxy_flush_to_local(channel_t *ch);
  * @param ch   通道
  * @param data 数据
  * @param len  数据长度
- * @return     成功返回写入的字节数，失败返回 -1
+ * @return     成功返回写入的字节数，本地关闭返回 PROXY_WRITE_LOCAL_CLOSED，
+ *             失败返回 -1
  */
 int proxy_write_to_local(channel_t *ch, const uint8_t *data, int len);
 

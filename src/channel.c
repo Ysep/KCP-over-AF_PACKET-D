@@ -1283,6 +1283,16 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                 }
 
                 write_ret = proxy_write_to_local(ch, kcp_buf, kcp_recv_len);
+                if (write_ret == PROXY_WRITE_LOCAL_CLOSED) {
+                    LOG_INFO("channel_process_frame: local peer closed "
+                             "(channel=%u, len=%d), sending RST",
+                             hdr->channel_id, kcp_recv_len);
+                    proxy_close_local(ch);
+                    channel_send_ctrl(ch, MPF_RST);
+                    ch->state = CHANNEL_CLOSED;
+                    channel_destroy(ctx, ch);
+                    return 0;
+                }
                 if (write_ret < 0) {
                     LOG_ERROR("channel_process_frame: "
                               "proxy_write_to_local failed "
@@ -1297,6 +1307,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                     proxy_close_local(ch);
                     channel_send_ctrl(ch, MPF_FIN);
                     ch->state = CHANNEL_FIN_SENT;
+                    ch->last_active = time_now();
                     return -1;
                 }
 
@@ -1596,11 +1607,10 @@ void channel_timeout_check(global_ctx_t *ctx)
             /*
              * 检查 1: 心跳超时
              * 如果距最后一次收到对端数据超过 heartbeat_timeout 秒，
-             * 且通道处于 ESTABLISHED 或 FIN_SENT 状态，则强制关闭。
-             * 注意：FIN_RCVD 不在此检查——它正通过 FIN_RCVD→TIME_WAIT→CLOSED 路径关闭。
+             * 且通道处于 ESTABLISHED 状态，则强制关闭。
+             * FIN_SENT/FIN_RCVD 走优雅关闭超时路径。
              */
-            if (ch->state == CHANNEL_ESTABLISHED ||
-                ch->state == CHANNEL_FIN_SENT) {
+            if (ch->state == CHANNEL_ESTABLISHED) {
 
                 if (time_elapsed(ch->last_peer_seen) >= (uint32_t)hb_timeout) {
                     LOG_ERROR("channel_timeout_check: "
@@ -1614,6 +1624,22 @@ void channel_timeout_check(global_ctx_t *ctx)
                     /* 发送 RST 通知对端 */
                     channel_send_ctrl(ch, MPF_RST);
 
+                    ch->state = CHANNEL_CLOSED;
+                    channel_destroy(ctx, ch);
+
+                    ch = next;
+                    continue;
+                }
+            }
+
+            if (ch->state == CHANNEL_FIN_SENT) {
+                if (time_elapsed(ch->last_active) >=
+                    (uint32_t)CHANNEL_GRACEFUL_TIMEOUT) {
+                    LOG_INFO("channel_timeout_check: FIN_SENT timeout "
+                             "for channel %u, destroying",
+                             ch->channel_id);
+
+                    channel_send_ctrl(ch, MPF_RST);
                     ch->state = CHANNEL_CLOSED;
                     channel_destroy(ctx, ch);
 
@@ -1858,6 +1884,7 @@ void channel_close_all(global_ctx_t *ctx)
                 }
 
                 ch->state = CHANNEL_FIN_SENT;
+                ch->last_active = time_now();
             } else if (ch->state == CHANNEL_SYN_SENT) {
                 channel_send_ctrl(ch, MPF_RST);  /* No connection established, send RST */
                 ch->state = CHANNEL_CLOSED;
