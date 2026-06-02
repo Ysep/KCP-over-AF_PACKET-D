@@ -234,3 +234,35 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 18:39 清理本地读失败和残留事件日志
+
+Commit: `d198d1e`
+
+### 背景
+
+连续执行 iperf3 时，服务器 B/C 在部分连接被本地 peer reset 或会话已关闭后仍输出偏错误级别的收尾日志：
+
+- B：`proxy_handle_event: proxy_handle_local_read failed (channel=65537, fd=7)`
+- C：`proxy_handle_event: no channel found for fd=6`
+
+### 根因
+
+本地 fd 可读事件中继续转发数据时，如果通道已经进入关闭流程，`channel_send_data()` 会失败。原逻辑直接返回错误，导致事件层继续按异常记录。另一方面，通道销毁后 epoll 中可能仍有旧 fd 的残留事件，原逻辑把该场景作为 WARN 返回错误。
+
+### 变更
+
+- `proxy_handle_local_read()` 在 `channel_send_data()` 失败时主动关闭本地 fd，发送 RST，销毁动态通道，并返回本地连接关闭结果，避免上层重复记录错误。
+- `proxy_handle_event()` 对找不到通道的 fd 残留事件降级为 `DEBUG` 并忽略，避免关闭竞态产生 WARN。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
