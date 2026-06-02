@@ -266,3 +266,40 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 18:52 将本地读错误按连接关闭处理
+
+Commit: `d2fbaef`
+
+### 背景
+
+服务器 A 执行 `iperf3 -c 192.168.1.198 -P 1 -t 10` 时，客户端出现：
+
+- `iperf3: error - unable to receive results:`
+
+服务器 B 同时仍出现：
+
+- `proxy_handle_event: proxy_handle_local_read failed (channel=65537, fd=7)`
+
+### 根因
+
+本地 TCP fd 在 iperf3 收尾期可能返回非 `ECONNRESET` 的读错误。原逻辑只把 `ECONNRESET` 归类为连接关闭，其它 `read()` 错误仍返回 `-1`，事件层随后输出 `proxy_handle_local_read failed`。UDP 分支的 `channel_send_data()` 失败也有同类冒泡路径。
+
+### 变更
+
+- 新增本地读侧关闭辅助逻辑，统一关闭 local fd、发送 RST、置为 `CHANNEL_CLOSED` 并销毁动态通道。
+- TCP `read()` 非阻塞之外的错误统一按本地连接关闭处理，不再向事件层冒泡为 ERROR。
+- TCP/UDP `channel_send_data()` 失败时统一走本地读侧关闭收尾。
+- `proxy_handle_event()` 对本地读返回负值的兜底路径改为关闭/RST/销毁并返回成功，避免再次输出 `proxy_handle_local_read failed`。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
