@@ -129,3 +129,37 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 处理 iperf 关闭期滞后数据
+
+Commit: `af762ee`
+
+### 背景
+
+iperf3 测试结束或连接收尾时，B/C 两端出现关闭期错误：
+
+- B：`channel_send_data: channel 65537 cannot send data in state=6`
+- C：`proxy_write_to_local: invalid local_fd for channel 65537`
+- C：`Reached max frames per cycle (64), possible frame flood`
+
+### 根因
+
+高吞吐 TCP 测试下，控制面 FIN/TIME_WAIT 和 KCP DATA 的到达顺序可能交错。通道已进入关闭流程后，B 端仍可能收到本地 socket 的滞后读事件，C 端也可能在本地 fd 已关闭后收到隧道内延迟 DATA。原逻辑把这些关闭期滞后事件当作错误处理。
+
+### 变更
+
+- `proxy_handle_local_read()` 对 `FIN_SENT`、`FIN_RCVD`、`TIME_WAIT`、`CLOSED` 状态的本地读事件直接关闭本地 fd 并返回，不再调用 `channel_send_data()`。
+- `channel_process_frame()` 在本地 fd 已关闭且通道处于关闭流程时，丢弃 KCP 中的延迟 DATA 并记录 `DEBUG`。
+- `MAX_FRAMES_PER_CYCLE` 从 64 提高到 1024，降低 iperf 高吞吐下的误报概率。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
