@@ -67,3 +67,35 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 将未完整 KCP 分片按暂无数据处理
+
+Commit: `a9080c5`
+
+### 背景
+
+服务器 A 已能成功 SSH 登录，但服务器 C 仍出现：
+
+- `kcp_wrap_recv: ikcp_recv error -2`
+- `channel_process_frame: kcp_wrap_recv error for channel 65536`
+
+### 根因
+
+`ikcp_recv()` 返回 `-2` 的路径对应 `ikcp_peeksize()` 判断队首 KCP 分片链尚未收齐。这是 KCP 正常收包过程中的“暂无完整应用消息”状态，不是协议错误。原封装把 `-2` 记录为错误并向上传播，导致 `channel_process_frame()` 报错。
+
+### 变更
+
+- `kcp_wrap_recv()` 将 `ikcp_recv()` 的 `-1` 和 `-2` 都按 EAGAIN 语义处理，返回 0。
+- 保留 `-3` 等真实错误的错误日志和失败返回。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
