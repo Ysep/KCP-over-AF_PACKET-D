@@ -95,7 +95,8 @@
 /* Channel 常量 */
 #define MAX_CHANNELS            65536       /* 最大通道配置数 */
 #define CHANNEL_HASH_SIZE_DEFAULT 1024      /* 默认哈希表大小 */
-#define CHANNEL_RECV_BUF_SIZE   8192        /* 通道接收缓冲区大小 */
+#define CHANNEL_RECV_BUF_SIZE   8192        /* socket 写阻塞时的待发送缓冲区大小 */
+#define KCP_APP_RECV_BUF_SIZE   (64 * 1024) /* KCP 单条应用消息接收缓冲区大小 */
 #define CHANNEL_ID_STATIC_MIN   1           /* 静态通道 ID 最小值 */
 #define HEARTBEAT_CH_ID         0xFFFFFFFF  /* 全局心跳通道ID */
 

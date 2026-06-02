@@ -1255,7 +1255,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
          * KCP 可能通过多次 recv 调用交付多个完整消息。
          */
         {
-            uint8_t kcp_buf[CHANNEL_RECV_BUF_SIZE];
+            uint8_t kcp_buf[KCP_APP_RECV_BUF_SIZE];
             int     kcp_recv_len;
 
             while ((kcp_recv_len = kcp_wrap_recv(ch->kcp, kcp_buf,

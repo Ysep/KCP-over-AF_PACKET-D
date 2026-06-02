@@ -87,6 +87,9 @@
 /* KCP→本地套接字刷新时的栈缓冲区大小 */
 #define PROXY_FLUSH_BUF_SIZE    (64 * 1024)
 
+/* proxy_handle_local_read 已经关闭并释放动态通道 */
+#define PROXY_LOCAL_READ_CLOSED (-2)
+
 /* ============================================================================
  * 模块级静态变量
  * ============================================================================ */
@@ -772,6 +775,19 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                 continue;
             }
 
+            if (errno == ECONNRESET) {
+                LOG_INFO("proxy_handle_local_read: connection reset by peer "
+                         "on fd=%d (channel=%u), closing session",
+                         ch->local_fd, ch->channel_id);
+                proxy_close_local(ch);
+                channel_send_ctrl(ch, MPF_RST);
+                ch->state = CHANNEL_CLOSED;
+                if (!(ch->flags & CH_FLAG_STATIC_LISTENER)) {
+                    channel_destroy(ctx, ch);
+                }
+                return PROXY_LOCAL_READ_CLOSED;
+            }
+
             /* 真正的读取错误 */
             LOG_ERROR("proxy_handle_local_read: read(fd=%d) failed: %s "
                       "(channel=%u)",
@@ -1391,6 +1407,9 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
          */
         if (events & EPOLLIN) {
             ret = proxy_handle_local_read(ctx, ch);
+            if (ret == PROXY_LOCAL_READ_CLOSED) {
+                return 0;
+            }
             if (ret < 0) {
                 LOG_ERROR("proxy_handle_event: proxy_handle_local_read "
                           "failed (channel=%u, fd=%d)",
