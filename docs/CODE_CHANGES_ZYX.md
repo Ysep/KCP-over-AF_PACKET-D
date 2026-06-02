@@ -34,3 +34,36 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-02 允许握手期通道发送数据
+
+Commit: `f9a1d9b`
+
+### 背景
+
+服务器 A 再次 SSH 登录时失败，服务器 B 和服务器 C 分别出现：
+
+- B：`channel_send_data: channel 65536 not ESTABLISHED (state=1)`
+- C：`channel_send_data: channel 65536 not ESTABLISHED (state=2)`
+
+其中 `state=1` 为 `CHANNEL_SYN_SENT`，`state=2` 为 `CHANNEL_SYN_RCVD`。
+
+### 根因
+
+SSH 客户端和 SSH 服务端都可能在隧道控制面握手刚开始时发送首批数据。原 `channel_send_data()` 只允许 `CHANNEL_ESTABLISHED` 状态发送数据，导致握手期的客户端 banner 或服务端 banner 被拒绝，进而触发本地读失败路径。
+
+### 变更
+
+- `channel_send_data()` 允许 `CHANNEL_SYN_SENT`、`CHANNEL_SYN_RCVD`、`CHANNEL_ESTABLISHED` 三种状态发送数据。
+- 保留关闭态、异常态的数据发送保护，避免已关闭通道继续写入 KCP。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
