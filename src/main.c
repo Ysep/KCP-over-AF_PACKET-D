@@ -394,8 +394,8 @@ int config_load(const char *path, global_config_t *config)
     /* ---- ethertype ---- */
     if (json_object_object_get_ex(root, "ethertype", &tmp)) {
         int raw_ethertype = json_object_get_int(tmp);
-        if (raw_ethertype <= 0 || raw_ethertype > 0xFFFF) {
-            LOG_ERROR("Ethertype %d out of range [1, 65535]", raw_ethertype);
+        if (raw_ethertype < 0x0600 || raw_ethertype > 0xFFFF) {
+            LOG_ERROR("Ethertype 0x%04X out of range [0x0600, 0xFFFF]", raw_ethertype);
             goto cleanup;
         }
         config->ethertype = (uint16_t)raw_ethertype;
@@ -587,8 +587,14 @@ int config_load(const char *path, global_config_t *config)
 
             memset(ch_cfg, 0, sizeof(*ch_cfg));
 
-            if (json_object_object_get_ex(ch_obj, "channel_id", &tmp))
-                ch_cfg->channel_id = (uint32_t)json_object_get_int(tmp);
+            if (json_object_object_get_ex(ch_obj, "channel_id", &tmp)) {
+                int raw_id = json_object_get_int(tmp);
+                if (raw_id <= 0) {
+                    LOG_ERROR("Channel %d: channel_id must be > 0, got %d", config->channel_count, raw_id);
+                    goto cleanup;
+                }
+                ch_cfg->channel_id = (uint32_t)raw_id;
+            }
 
             if (json_object_object_get_ex(ch_obj, "listen_port", &tmp))
                 ch_cfg->listen_port = (uint16_t)json_object_get_int(tmp);
@@ -623,7 +629,13 @@ int config_load(const char *path, global_config_t *config)
             /* max_sessions: 0=默认1，上限65535 */
             if (json_object_object_get_ex(ch_obj, "max_sessions", &tmp)) {
                 int ms = json_object_get_int(tmp);
-                ch_cfg->max_sessions = (ms > 0 && ms <= 65535) ? (uint16_t)ms : 1;
+                if (ms > 65535) {
+                    LOG_WARN("Channel %d (id=%u): max_sessions %d exceeds 65535, capping",
+                             config->channel_count, ch_cfg->channel_id, ms);
+                    ch_cfg->max_sessions = 65535;
+                } else {
+                    ch_cfg->max_sessions = (ms > 0) ? (uint16_t)ms : 1;
+                }
             } else {
                 ch_cfg->max_sessions = 1;
             }
@@ -756,6 +768,11 @@ int validate_config(const global_config_t *config)
         if (config->encryption.sm4_key[0] == '\0') {
             LOG_ERROR("Encryption is enabled but no sm4_key provided "
                       "(need %d hex characters)", SM4_KEY_HEX_LEN);
+            return -1;
+        }
+        if (strlen(config->encryption.sm4_key) != SM4_KEY_HEX_LEN) {
+            LOG_ERROR("Encryption sm4_key must be exactly %d hex characters, got %zu",
+                      SM4_KEY_HEX_LEN, strlen(config->encryption.sm4_key));
             return -1;
         }
     }

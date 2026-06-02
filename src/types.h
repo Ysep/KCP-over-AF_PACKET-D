@@ -499,6 +499,7 @@ typedef struct channel_s {
     /* 重传标记 */
     uint8_t         syn_retry_count;    /* SYN 重传计数 */
     uint8_t         fin_retry_count;    /* FIN 重传计数 */
+    uint8_t         connect_pending;    /* 异步TCP connect进行中：1=等待EPOLLOUT确认 */
 
     /* 统计 */
     channel_stats_t stats;              /* 通道统计 */
