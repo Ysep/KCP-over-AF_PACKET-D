@@ -59,6 +59,37 @@ make test
 
 结果：全部通过。
 
+## 2026-06-03 17:15 立即刷新 KCP 发送队列
+
+Commit: `06bd957`
+
+### 背景
+
+前一次修复后隧道吞吐从约 304 Mbit/s 提升到约 429 Mbit/s，但发送端仍出现 `Retr=862`，且 TCP `Cwnd` 长时间保持在约 89.1 KBytes，说明服务器 B 的入口 TCP 仍持续承压，数据进入 KCP 后的发送节奏仍不够平滑。
+
+### 根因
+
+当前 KCP 主要依赖 10ms 周期 `channel_kcp_update()` 统一 flush。高吞吐时服务器 B 会先从本地 TCP 读入较多数据，再在周期点集中向 AF_PACKET 发送，容易造成 KCP/AF_PACKET 突发发送和网卡队列压力，进而让入口 TCP 出现重传和窗口收缩。
+
+### 变更
+
+- 新增 `kcp_wrap_flush()`，支持在 KCP 数据入队后立即刷新输出队列。
+- `channel_send_data()` 在 `kcp_wrap_send()` 成功后立即调用 `kcp_wrap_flush()`，减少 10ms 周期批量突发。
+- 首次 flush 时自动执行一次 `ikcp_update()` 初始化 KCP 时间基准，后续 flush 直接更新 `current` 并调用 `ikcp_flush()`。
+- 保留周期 `channel_kcp_update()`，继续负责 ACK、重传、超时和背压恢复。
+- 本次提交同时按要求纳入当前已变动文件和重编译后的二进制。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
+
 ## 2026-06-03 17:05 减少隧道高吞吐发送丢帧
 
 Commit: `0a2f84a`
