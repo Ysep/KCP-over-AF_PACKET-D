@@ -643,3 +643,35 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 15:46 修复本地读计数溢出
+
+Commit: `f2f6bcc`
+
+### 背景
+
+服务器 B 在 iperf3 高吞吐传输中出现：
+
+- `proxy_handle_event: proxy_handle_local_read returned -862076032 (channel=65537, fd=7), closing session`
+
+### 根因
+
+`proxy_handle_local_read()` 在 edge-triggered TCP 读事件中会循环读取直到 `EAGAIN`。iperf3 高吞吐下，单次事件累计读取字节数可能超过 32 位 `int` 上限，`total_read` 溢出成负数后被事件层误判为本地读失败，从而关闭会话。
+
+### 变更
+
+- 将 `proxy_handle_local_read()` 的累计读取计数从 `int` 改为 `size_t`。
+- 调整调试日志格式为 `%zu`。
+- 返回给事件层前将超过 `INT_MAX` 的成功读取计数截断为 `INT_MAX`，保证成功读不会变成负返回值。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
