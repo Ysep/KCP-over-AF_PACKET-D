@@ -304,6 +304,64 @@ cleanup:
     unlink(tmp_path);
 }
 
+static void test_config_load_port_range(void)
+{
+    TEST("config_load: listen_port_range 展开连续端口");
+
+    const char *json =
+        "{"
+        "  \"interface\": \"eth0\","
+        "  \"ethertype\": 35013,"
+        "  \"channels\": ["
+        "    {"
+        "      \"channel_id\": 100,"
+        "      \"listen_port_range\": \"5201-5203\","
+        "      \"remote_port\": 6201,"
+        "      \"listen_addr\": \"0.0.0.0\","
+        "      \"remote_addr\": \"192.168.1.67\","
+        "      \"is_tcp\": true,"
+        "      \"max_sessions\": 16"
+        "    }"
+        "  ]"
+        "}";
+
+    const char *tmp_path = "/tmp/test_integration_port_range.json";
+    if (write_temp_json(tmp_path, json) != 0) {
+        FAIL("cannot write temp config file");
+        return;
+    }
+
+    static global_config_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    int ret = config_load(tmp_path, &cfg);
+
+    CHECK(ret == 0, "config_load failed for port range");
+    CHECK(cfg.channel_count == 3, "port range should expand to 3 channels");
+
+    CHECK(cfg.channels[0].channel_id == 100, "channel[0] id mismatch");
+    CHECK(cfg.channels[0].listen_port == 5201, "channel[0] listen_port mismatch");
+    CHECK(cfg.channels[0].remote_port == 6201, "channel[0] remote_port mismatch");
+    CHECK(cfg.channels[0].max_sessions == 16, "channel[0] max_sessions mismatch");
+
+    CHECK(cfg.channels[1].channel_id == 101, "channel[1] id mismatch");
+    CHECK(cfg.channels[1].listen_port == 5202, "channel[1] listen_port mismatch");
+    CHECK(cfg.channels[1].remote_port == 6202, "channel[1] remote_port mismatch");
+
+    CHECK(cfg.channels[2].channel_id == 102, "channel[2] id mismatch");
+    CHECK(cfg.channels[2].listen_port == 5203, "channel[2] listen_port mismatch");
+    CHECK(cfg.channels[2].remote_port == 6203, "channel[2] remote_port mismatch");
+
+    ret = validate_config(&cfg);
+    CHECK(ret == 0, "validate_config should pass for expanded port range");
+
+    unlink(tmp_path);
+    PASS();
+    return;
+
+cleanup:
+    unlink(tmp_path);
+}
+
 static void test_config_load_reverse_node_type(void)
 {
     TEST("config_load: reverse 代理模式解析");
@@ -1207,6 +1265,7 @@ void run_integration_tests(void)
     print_banner("Suite 1: 配置加载和验证 (Config Load & Validate)");
     test_config_load_valid();
     test_config_with_defaults();
+    test_config_load_port_range();
     test_config_load_reverse_node_type();
     test_config_load_nonexistent_file();
 

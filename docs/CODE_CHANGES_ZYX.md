@@ -343,3 +343,37 @@ make
 ```
 
 结果：全部通过。
+
+## 2026-06-03 11:33 增加端口范围配置语法
+
+Commit: 本次自动提交
+
+### 背景
+
+连续代理多个端口时，原配置必须在 `channels[]` 中逐条手写每个端口映射。例如代理 `5201-5203` 需要写 3 条 channel；端口数量增加时配置冗长，也更容易出现 `channel_id`、监听端口或远端端口不连续的人工错误。
+
+### 根因
+
+配置解析只支持单个 `listen_port` 和 `remote_port` 字段，没有端口范围语法。运行时通道和热重载已经基于展开后的 `channels[]` 工作，因此更合适的实现方式是在 `config_load()` 阶段把范围配置展开为多条现有 `channel_config_t`，保持代理、通道状态机和动态会话分配逻辑不变。
+
+### 变更
+
+- 新增 `listen_port_range` 配置字段，支持 `"5201-5203"` 和 `[5201, 5203]` 两种写法。
+- 新增 `remote_port_range` 配置字段；也支持只写 `remote_port` 作为起始端口，按监听范围偏移自动递增。
+- 端口范围展开时，`channel_id` 作为起始 ID，内部通道按 `channel_id + offset` 递增。
+- 增加范围合法性检查：端口范围必须在 `1-65535`，起止顺序必须有效，监听范围和远端范围长度必须一致，展开数量不能超过 `MAX_CHANNELS`。
+- 新增配置加载回归测试，验证 `listen_port_range` 能展开为多条通道，并正确递增 `channel_id`、`listen_port` 和 `remote_port`。
+- 更新 `docs/CONFIG.md` 和 `docs/DEPLOYMENT.md`，记录新语法和示例。
+- 重新编译 `kcp-afpacket` 主二进制。
+
+### 验证
+
+已执行：
+
+```bash
+make test-integ
+make
+make test
+```
+
+结果：全部通过。
