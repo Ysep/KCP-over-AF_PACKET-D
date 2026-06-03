@@ -937,6 +937,7 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
                     } else {
                         LOG_ERROR("Failed to connect remote for "
                                   "dynamic channel %u, destroying", ch->channel_id);
+                        channel_send_ctrl(ch, MPF_RST);
                         channel_destroy(ctx, ch);
                         return -1;
                     }

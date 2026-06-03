@@ -765,10 +765,13 @@ int proxy_connect_remote(channel_t *ch)
         LOG_INFO("proxy_connect_remote: connected to %s:%u "
                  "(fd=%d, channel=%u, immediate)",
                  ch->remote_addr, ch->remote_port, fd, ch->channel_id);
+        ch->connect_pending = 0;
     } else {
+        /* 异步连接进行中 → 标志等待第一次 EPOLLOUT 时检查 SO_ERROR */
         LOG_INFO("proxy_connect_remote: connecting to %s:%u "
                  "(fd=%d, channel=%u, in progress)",
                  ch->remote_addr, ch->remote_port, fd, ch->channel_id);
+        ch->connect_pending = 1;
     }
 
     return fd;
@@ -925,6 +928,19 @@ int proxy_handle_local_write(channel_t *ch)
     }
 
     if (ch->recv_buf_len == 0) {
+        /* 检查异步 connect 是否成功完成（首次 EPOLLOUT 到达时） */
+        if (ch->connect_pending) {
+            int       so_err = 0;
+            socklen_t so_len = sizeof(so_err);
+            if (getsockopt(ch->local_fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) == 0
+                && so_err != 0) {
+                LOG_ERROR("proxy_handle_local_write: async connect failed "
+                          "(fd=%d, channel=%u): %s",
+                          ch->local_fd, ch->channel_id, strerror(so_err));
+                return -1;
+            }
+            ch->connect_pending = 0;
+        }
         /* 没有待发送数据 */
         return 0;
     }
