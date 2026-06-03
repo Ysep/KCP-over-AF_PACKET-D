@@ -80,8 +80,8 @@
  * ============================================================================ */
 
 /* 高性能套接字缓冲区大小 */
-#define AF_PKT_SOCK_SNDBUF      (4 * 1024 * 1024)
-#define AF_PKT_SOCK_RCVBUF      (4 * 1024 * 1024)
+#define AF_PKT_SOCK_SNDBUF      (16 * 1024 * 1024)
+#define AF_PKT_SOCK_RCVBUF      (16 * 1024 * 1024)
 
 /* /proc/net/packet 行最大长度 */
 #define PROC_NET_PACKET_LINE_MAX 512

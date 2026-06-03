@@ -89,8 +89,8 @@
 #define PROXY_FLUSH_BUF_SIZE    (64 * 1024)
 
 /* KCP 发送队列背压水位（ikcp_waitsnd 返回等待发送的 KCP 段数） */
-#define KCP_READ_PAUSE_WAITSND  (KCP_SEND_WINDOW * 16)
-#define KCP_READ_RESUME_WAITSND (KCP_SEND_WINDOW * 8)
+#define KCP_READ_PAUSE_WAITSND  (KCP_SEND_WINDOW * 4)
+#define KCP_READ_RESUME_WAITSND (KCP_SEND_WINDOW * 2)
 
 /* proxy_handle_local_read 已经关闭并释放动态通道 */
 #define PROXY_LOCAL_READ_CLOSED (-2)

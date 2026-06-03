@@ -84,8 +84,8 @@
 #define KCP_MTU_PERFORMANCE     1478        /* 高性能 KCP MTU */
 #define KCP_MSS_CONSERVATIVE    1376        /* 保守 MSS */
 #define KCP_MSS_PERFORMANCE     1454        /* 高性能 MSS */
-#define KCP_SEND_WINDOW         128         /* 发送窗口（段数） */
-#define KCP_RECV_WINDOW         128         /* 接收窗口（段数） */
+#define KCP_SEND_WINDOW         1024        /* 发送窗口（段数） */
+#define KCP_RECV_WINDOW         1024        /* 接收窗口（段数） */
 #define KCP_NODELAY             1           /* 启用 nodelay 模式 */
 #define KCP_INTERVAL            10          /* KCP 内部更新间隔（ms） */
 #define KCP_RESEND              2           /* 快速重传阈值 */

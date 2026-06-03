@@ -153,8 +153,8 @@ static int init_test_ctx(global_ctx_t *ctx)
     ctx->config.node_type       = NODE_TYPE_FRONTEND;
     ctx->config.max_channels    = 512;
     ctx->config.kcp_mtu         = 1400;
-    ctx->config.kcp_send_window = 128;
-    ctx->config.kcp_recv_window = 128;
+    ctx->config.kcp_send_window = KCP_SEND_WINDOW;
+    ctx->config.kcp_recv_window = KCP_RECV_WINDOW;
     ctx->config.kcp_nodelay     = 1;
     ctx->config.kcp_interval    = 10;
     ctx->config.kcp_resend      = 2;
@@ -2913,8 +2913,8 @@ static void test_hash_init_64(void)
     ctx.config.node_type = NODE_TYPE_FRONTEND;
     ctx.config.max_channels = 32;
     ctx.config.kcp_mtu = 1400;
-    ctx.config.kcp_send_window = 128;
-    ctx.config.kcp_recv_window = 128;
+    ctx.config.kcp_send_window = KCP_SEND_WINDOW;
+    ctx.config.kcp_recv_window = KCP_RECV_WINDOW;
 
     /* max_channels=32 → hash_size=64 (32*2, clamp min 64) */
     int ret = channel_init(&ctx, 32);
@@ -2941,8 +2941,8 @@ static void test_hash_init_8192(void)
     ctx.config.node_type = NODE_TYPE_FRONTEND;
     ctx.config.max_channels = 4096;
     ctx.config.kcp_mtu = 1400;
-    ctx.config.kcp_send_window = 128;
-    ctx.config.kcp_recv_window = 128;
+    ctx.config.kcp_send_window = KCP_SEND_WINDOW;
+    ctx.config.kcp_recv_window = KCP_RECV_WINDOW;
 
     /* max_channels=4096 → hash_size=8192 (4096*2) */
     int ret = channel_init(&ctx, 4096);
@@ -3370,18 +3370,18 @@ cleanup:
     return;
 }
 
-/* Test 98: KCP window parameter verification (128) */
+/* Test 98: KCP window parameter verification */
 static void test_kcp_window_parameter(void)
 {
-    TEST("KCP window parameters are 128 (SEND/RECV)");
+    TEST("KCP window parameters match defaults (SEND/RECV)");
     static global_ctx_t ctx;
 
     CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
 
-    CHECK(ctx.config.kcp_send_window == 128,
-          "kcp_send_window must be 128 (KCP_SEND_WINDOW)");
-    CHECK(ctx.config.kcp_recv_window == 128,
-          "kcp_recv_window must be 128 (KCP_RECV_WINDOW)");
+    CHECK(ctx.config.kcp_send_window == KCP_SEND_WINDOW,
+          "kcp_send_window must match KCP_SEND_WINDOW");
+    CHECK(ctx.config.kcp_recv_window == KCP_RECV_WINDOW,
+          "kcp_recv_window must match KCP_RECV_WINDOW");
 
     channel_shutdown(&ctx);
     PASS();
