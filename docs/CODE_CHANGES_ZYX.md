@@ -59,6 +59,41 @@ make test
 
 结果：全部通过。
 
+## 2026-06-03 17:27 将传输性能参数改为配置项
+
+Commit: `93e0abf`
+
+### 背景
+
+为了继续调试隧道吞吐和发送端重传，需要把影响传输速度的硬编码参数改为 JSON 配置，方便在服务器 B/C 现场快速调整并对比效果。
+
+### 变更
+
+- 新增顶层 `performance` 配置段，支持配置 AF_PACKET socket 缓冲、AF_PACKET 发送重试、本地 TCP socket 缓冲、KCP 读背压水位、KCP 立即 flush 开关和主循环每轮收帧预算。
+- `af_packet_send()` 的发送重试参数改为由配置控制。
+- AF_PACKET 创建时使用配置里的 `af_packet_sndbuf` / `af_packet_rcvbuf` 设置 socket 缓冲。
+- proxy 本地 TCP 连接使用配置里的 `proxy_tcp_sockbuf` 设置 `SO_SNDBUF` / `SO_RCVBUF`。
+- KCP 本地读暂停/恢复水位使用配置里的 `kcp_read_pause_waitsnd` / `kcp_read_resume_waitsnd`。
+- `channel_send_data()` 的 KCP 入队后立即 flush 行为改为 `kcp_immediate_flush` 可配置。
+- 主循环 raw socket 单轮处理帧数改为 `max_frames_per_cycle` 可配置。
+- 更新 `sample/config.example.json`、`sample/config-node-b.json`、`sample/config-node-c.json`。
+- 新增性能配置说明文档 `docs/PERFORMANCE_CONFIG.md`，并在 `docs/CONFIG.md` 中添加入口。
+- 本次提交同时按要求纳入当前已变动文件和重编译后的二进制。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+python3 -m json.tool sample/config.example.json
+python3 -m json.tool sample/config-node-b.json
+python3 -m json.tool sample/config-node-c.json
+```
+
+结果：全部通过。
+
 ## 2026-06-03 17:15 立即刷新 KCP 发送队列
 
 Commit: `06bd957`
