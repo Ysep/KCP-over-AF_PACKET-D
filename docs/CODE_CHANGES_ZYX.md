@@ -675,3 +675,36 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 16:14 为 KCP 发送队列增加本地读背压
+
+Commit: `e8f3740`
+
+### 背景
+
+服务器 A 执行 `iperf3 -c 192.168.1.198 -P 1 -t 10` 时，A 端显示发送 2.86 GB、2.45 Gbit/s，但服务器 C 端只收到 363 KB、296 Kbit/s。
+
+### 根因
+
+B 端代理在本地 TCP fd 可读时会一直读取到 `EAGAIN`，并把数据持续送入 KCP 发送队列。缺少 KCP 发送队列背压时，A 到 B 的本地 TCP 可以高速完成，但实际 AF_PACKET/KCP 链路无法同步发送，导致数据大量积压在 B 端 KCP 队列，C 端接收速率远低于 A 端显示的发送速率。
+
+### 变更
+
+- 新增 `CH_FLAG_KCP_READ_PAUSED` 标志，表示通道本地读因 KCP 发送队列高水位暂停。
+- 新增 KCP 发送队列高/低水位：`waitsnd >= 2048` 段暂停本地 `EPOLLIN`，`waitsnd <= 1024` 段恢复。
+- `proxy_get_events()` 根据背压标志动态移除或恢复本地 fd 的 `EPOLLIN`。
+- `proxy_handle_local_read()` 在入队数据后检查 KCP 队列水位，达到高水位即停止继续读取本地 TCP。
+- `channel_kcp_update()` 在 KCP 周期更新后检查是否已降到低水位，自动恢复本地读。
+- 为未链接 `proxy.c` 的无网络测试提供弱符号 no-op fallback，保持测试可独立链接。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
