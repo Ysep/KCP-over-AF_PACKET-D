@@ -88,6 +88,9 @@
 /* KCP→本地套接字刷新时的栈缓冲区大小 */
 #define PROXY_FLUSH_BUF_SIZE    (64 * 1024)
 
+/* 本地 TCP socket 缓冲区，降低 iperf 大流量下的内核侧背压 */
+#define PROXY_TCP_SOCK_BUF_SIZE (4 * 1024 * 1024)
+
 /* KCP 发送队列背压水位（ikcp_waitsnd 返回等待发送的 KCP 段数） */
 #define KCP_READ_PAUSE_WAITSND  (KCP_SEND_WINDOW * 4)
 #define KCP_READ_RESUME_WAITSND (KCP_SEND_WINDOW * 2)
@@ -108,6 +111,22 @@ static global_ctx_t *g_ctx = NULL;
 /* ============================================================================
  * 内部辅助函数（前向声明）
  * ============================================================================ */
+static void proxy_set_tcp_sockbuf(int fd)
+{
+    int val = PROXY_TCP_SOCK_BUF_SIZE;
+
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0) {
+        LOG_WARN("proxy_set_tcp_sockbuf: setsockopt(SO_RCVBUF) failed "
+                 "(fd=%d, size=%d): %s", fd, val, strerror(errno));
+    }
+
+    val = PROXY_TCP_SOCK_BUF_SIZE;
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val)) < 0) {
+        LOG_WARN("proxy_set_tcp_sockbuf: setsockopt(SO_SNDBUF) failed "
+                 "(fd=%d, size=%d): %s", fd, val, strerror(errno));
+    }
+}
+
 static int proxy_epoll_mod_events(global_ctx_t *ctx, int fd,
                                   void *ptr, uint32_t events);
 
@@ -633,6 +652,7 @@ int proxy_accept(global_ctx_t *ctx, channel_t *ch)
             close(client_fd);
             return -1;
         }
+        proxy_set_tcp_sockbuf(client_fd);
 
         /* SO_KEEPALIVE: 检测死连接 */
         optval = 1;
@@ -784,6 +804,7 @@ int proxy_connect_remote(channel_t *ch)
             close(fd);
             return -1;
         }
+        proxy_set_tcp_sockbuf(fd);
     }
 
     /* 关闭旧的 local_fd（如果存在） */

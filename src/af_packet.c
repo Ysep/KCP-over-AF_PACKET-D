@@ -68,6 +68,7 @@
 #include <linux/if_packet.h>
 #include <net/if.h>
 #include <netinet/ether.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,6 +89,10 @@
 
 /* 单次发送/接收帧硬上限（以太网头 + 有效载荷 + VLAN + 安全余量） */
 #define AF_PKT_MAX_FRAME         (ETH_HDR_SIZE + ETH_MAX_PAYLOAD + 128)
+
+/* AF_PACKET 非阻塞发送短等待重试参数 */
+#define AF_PKT_SEND_RETRY_MAX    8
+#define AF_PKT_SEND_WAIT_MS      1
 
 /* ============================================================================
  * 内部辅助函数
@@ -388,21 +393,48 @@ ssize_t af_packet_send(int sock, int ifindex,
     memcpy(sll.sll_addr, dst_mac, ETH_ALEN);
     /* sll_addr 在结构体中为 8 字节，ETH_ALEN 为 6；其余由 memset 归零 */
 
-    /* --- 发送 --- */
-    sent = sendto(sock, frame_buf, frame_len, 0,
-                  (const struct sockaddr *)&sll, sizeof(sll));
-    if (sent < 0) {
+    /* --- 发送 ---
+     * KCP output 回调无法回滚已经 flush 的段。非阻塞 AF_PACKET 在发送缓冲
+     * 暂满时如果直接返回，会导致 KCP 帧实际丢失，上层 TCP 看到大量重传。
+     * 因此对 EAGAIN 做短等待重试，把瞬时背压尽量吸收在发送层。
+     */
+    for (int attempt = 0; attempt <= AF_PKT_SEND_RETRY_MAX; attempt++) {
+        sent = sendto(sock, frame_buf, frame_len, 0,
+                      (const struct sockaddr *)&sll, sizeof(sll));
+        if (sent >= 0) {
+            break;
+        }
+
         saved_errno = errno;
-        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) {
-            LOG_DEBUG("af_packet_send: send buffer full "
+        if (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK) {
+            LOG_ERROR("af_packet_send: sendto failed (ifindex=%d, len=%zu): %s",
+                      ifindex, frame_len, strerror(saved_errno));
+            errno = saved_errno;
+            return -1;
+        }
+
+        if (attempt == AF_PKT_SEND_RETRY_MAX) {
+            LOG_DEBUG("af_packet_send: send buffer still full after retry "
                       "(ifindex=%d, len=%zu)", ifindex, frame_len);
             errno = saved_errno;
             return -1;
         }
-        LOG_ERROR("af_packet_send: sendto failed (ifindex=%d, len=%zu): %s",
-                  ifindex, frame_len, strerror(saved_errno));
-        errno = saved_errno;
-        return -1;
+
+        {
+            struct pollfd pfd;
+
+            memset(&pfd, 0, sizeof(pfd));
+            pfd.fd = sock;
+            pfd.events = POLLOUT;
+
+            if (poll(&pfd, 1, AF_PKT_SEND_WAIT_MS) < 0 && errno != EINTR) {
+                saved_errno = errno;
+                LOG_ERROR("af_packet_send: poll(POLLOUT) failed "
+                          "(ifindex=%d): %s", ifindex, strerror(saved_errno));
+                errno = saved_errno;
+                return -1;
+            }
+        }
     }
 
     if ((size_t)sent != frame_len) {
