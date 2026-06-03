@@ -77,8 +77,10 @@
 #include <signal.h>
 #include <getopt.h>
 #include <errno.h>
+#include <dirent.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
+#include <sys/resource.h>
 #include <json-c/json.h>
 
 #include "types.h"
@@ -102,6 +104,76 @@ static global_ctx_t *g_ctx = NULL;
 
 /* ---- 前向声明 ---- */
 static void cleanup(global_ctx_t *ctx);
+
+#define FRONTEND_FD_RESERVE 32
+
+static int count_open_fds(void)
+{
+    DIR *dir;
+    struct dirent *ent;
+    int count = 0;
+
+    dir = opendir("/proc/self/fd");
+    if (!dir) {
+        return -1;
+    }
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        count++;
+    }
+
+    closedir(dir);
+    return count;
+}
+
+static int ensure_listener_fd_budget(global_ctx_t *ctx,
+                                     int additional_listeners,
+                                     const char *phase,
+                                     uint32_t channel_id)
+{
+    struct rlimit rl;
+    int open_fds;
+    rlim_t projected;
+
+    if (!ctx || ctx->config.node_type != NODE_TYPE_FRONTEND ||
+        additional_listeners <= 0) {
+        return 0;
+    }
+
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        LOG_WARN("fd budget check skipped during %s: getrlimit failed: %s",
+                 phase, strerror(errno));
+        return 0;
+    }
+
+    if (rl.rlim_cur == RLIM_INFINITY) {
+        return 0;
+    }
+
+    open_fds = count_open_fds();
+    if (open_fds < 0) {
+        LOG_WARN("fd budget check skipped during %s: cannot inspect /proc/self/fd: %s",
+                 phase, strerror(errno));
+        return 0;
+    }
+
+    projected = (rlim_t)open_fds +
+                (rlim_t)additional_listeners +
+                (rlim_t)FRONTEND_FD_RESERVE;
+    if (projected <= rl.rlim_cur) {
+        return 0;
+    }
+
+    LOG_ERROR("fd budget insufficient during %s: open_fds=%d, need_listeners=%d, "
+              "reserve=%d, soft_limit=%llu, channel=%u. "
+              "Reduce listen_port_range/listener count or raise 'ulimit -n'.",
+              phase, open_fds, additional_listeners, FRONTEND_FD_RESERVE,
+              (unsigned long long)rl.rlim_cur, channel_id);
+    return -1;
+}
 
 /* ──────────────────────────────────────────────────────────────────────────
  * signal_handler — 统一信号处理器
@@ -366,6 +438,55 @@ static void parse_acl(json_object *obj, channel_acl_t *acl)
     }
 }
 
+static int parse_port_range_value(json_object *obj, uint16_t *start, uint16_t *end)
+{
+    int a;
+    int b;
+
+    if (!obj || !start || !end) {
+        return -1;
+    }
+
+    if (json_object_is_type(obj, json_type_array)) {
+        if (json_object_array_length(obj) != 2) {
+            return -1;
+        }
+        a = json_object_get_int(json_object_array_get_idx(obj, 0));
+        b = json_object_get_int(json_object_array_get_idx(obj, 1));
+    } else {
+        const char *s = json_object_get_string(obj);
+        char *tail = NULL;
+
+        if (!s || !s[0]) {
+            return -1;
+        }
+
+        errno = 0;
+        long first = strtol(s, &tail, 10);
+        if (errno != 0 || tail == s || *tail != '-') {
+            return -1;
+        }
+
+        errno = 0;
+        char *endptr = NULL;
+        long second = strtol(tail + 1, &endptr, 10);
+        if (errno != 0 || endptr == tail + 1 || *endptr != '\0') {
+            return -1;
+        }
+
+        a = (int)first;
+        b = (int)second;
+    }
+
+    if (a < 1 || a > 65535 || b < 1 || b > 65535 || a > b) {
+        return -1;
+    }
+
+    *start = (uint16_t)a;
+    *end = (uint16_t)b;
+    return 0;
+}
+
 int config_load(const char *path, global_config_t *config)
 {
     struct json_object *root = NULL;
@@ -583,31 +704,89 @@ int config_load(const char *path, global_config_t *config)
         config->channel_count = 0;
         for (int i = 0; i < arr_len; i++) {
             struct json_object *ch_obj = json_object_array_get_idx(obj, i);
-            channel_config_t *ch_cfg = &config->channels[config->channel_count];
+            channel_config_t base_cfg;
+            uint16_t listen_start = 0;
+            uint16_t listen_end = 0;
+            uint16_t remote_start = 0;
+            uint16_t remote_end = 0;
+            uint32_t range_len = 1;
+            uint8_t has_listen_range = 0;
+            uint8_t has_remote_range = 0;
 
-            memset(ch_cfg, 0, sizeof(*ch_cfg));
+            memset(&base_cfg, 0, sizeof(base_cfg));
 
             if (json_object_object_get_ex(ch_obj, "channel_id", &tmp)) {
                 int raw_id = json_object_get_int(tmp);
                 if (raw_id <= 0) {
-                    LOG_ERROR("Channel %d: channel_id must be > 0, got %d", config->channel_count, raw_id);
+                    LOG_ERROR("Channel %d: channel_id must be > 0, got %d",
+                              config->channel_count, raw_id);
                     goto cleanup;
                 }
-                ch_cfg->channel_id = (uint32_t)raw_id;
+                base_cfg.channel_id = (uint32_t)raw_id;
             }
 
-            if (json_object_object_get_ex(ch_obj, "listen_port", &tmp))
-                ch_cfg->listen_port = (uint16_t)json_object_get_int(tmp);
+            if (json_object_object_get_ex(ch_obj, "listen_port_range", &tmp)) {
+                if (parse_port_range_value(tmp, &listen_start, &listen_end) != 0) {
+                    LOG_ERROR("Channel %d (id=%u): invalid listen_port_range",
+                              config->channel_count, base_cfg.channel_id);
+                    goto cleanup;
+                }
+                has_listen_range = 1;
+            } else if (json_object_object_get_ex(ch_obj, "listen_port", &tmp)) {
+                listen_start = (uint16_t)json_object_get_int(tmp);
+                listen_end = listen_start;
+            }
 
-            if (json_object_object_get_ex(ch_obj, "remote_port", &tmp))
-                ch_cfg->remote_port = (uint16_t)json_object_get_int(tmp);
+            if (json_object_object_get_ex(ch_obj, "remote_port_range", &tmp)) {
+                if (parse_port_range_value(tmp, &remote_start, &remote_end) != 0) {
+                    LOG_ERROR("Channel %d (id=%u): invalid remote_port_range",
+                              config->channel_count, base_cfg.channel_id);
+                    goto cleanup;
+                }
+                has_remote_range = 1;
+            } else if (json_object_object_get_ex(ch_obj, "remote_port", &tmp)) {
+                remote_start = (uint16_t)json_object_get_int(tmp);
+                if (has_listen_range) {
+                    uint32_t listen_len = (uint32_t)listen_end - listen_start + 1;
+                    if ((uint32_t)remote_start + listen_len - 1 > 65535) {
+                        LOG_ERROR("Channel %d (id=%u): remote_port base %u "
+                                  "cannot cover listen_port_range length %u",
+                                  config->channel_count, base_cfg.channel_id,
+                                  remote_start, listen_len);
+                        goto cleanup;
+                    }
+                    remote_end = (uint16_t)(remote_start + listen_len - 1);
+                } else {
+                    remote_end = remote_start;
+                }
+            }
+
+            if (has_listen_range || has_remote_range) {
+                if (!has_listen_range) {
+                    LOG_ERROR("Channel %d (id=%u): remote_port_range requires "
+                              "listen_port_range",
+                              config->channel_count, base_cfg.channel_id);
+                    goto cleanup;
+                }
+
+                uint32_t listen_len = (uint32_t)listen_end - listen_start + 1;
+                uint32_t remote_len = (uint32_t)remote_end - remote_start + 1;
+                if (listen_len != remote_len) {
+                    LOG_ERROR("Channel %d (id=%u): listen_port_range and "
+                              "remote_port_range lengths differ (%u vs %u)",
+                              config->channel_count, base_cfg.channel_id,
+                              listen_len, remote_len);
+                    goto cleanup;
+                }
+                range_len = listen_len;
+            }
 
             if (json_object_object_get_ex(ch_obj, "listen_addr", &tmp)) {
                 const char *s = json_object_get_string(tmp);
                 if (s) {
                     /* strncpy with manual NUL termination is intentional */
-                    strncpy(ch_cfg->listen_addr, s, MAX_LISTEN_ADDR - 1);
-                    ch_cfg->listen_addr[MAX_LISTEN_ADDR - 1] = '\0';
+                    strncpy(base_cfg.listen_addr, s, MAX_LISTEN_ADDR - 1);
+                    base_cfg.listen_addr[MAX_LISTEN_ADDR - 1] = '\0';
                 }
             }
 
@@ -615,35 +794,55 @@ int config_load(const char *path, global_config_t *config)
                 const char *s = json_object_get_string(tmp);
                 if (s) {
                     /* strncpy with manual NUL termination is intentional */
-                    strncpy(ch_cfg->remote_addr, s, MAX_REMOTE_ADDR - 1);
-                    ch_cfg->remote_addr[MAX_REMOTE_ADDR - 1] = '\0';
+                    strncpy(base_cfg.remote_addr, s, MAX_REMOTE_ADDR - 1);
+                    base_cfg.remote_addr[MAX_REMOTE_ADDR - 1] = '\0';
                 }
             }
 
             if (json_object_object_get_ex(ch_obj, "is_tcp", &tmp)) {
-                ch_cfg->is_tcp = json_object_get_boolean(tmp) ? 1 : 0;
+                base_cfg.is_tcp = json_object_get_boolean(tmp) ? 1 : 0;
             }
 
-            ch_cfg->enabled = 1;
+            base_cfg.enabled = 1;
 
             /* max_sessions: 0=默认1，上限65535 */
             if (json_object_object_get_ex(ch_obj, "max_sessions", &tmp)) {
                 int ms = json_object_get_int(tmp);
                 if (ms > 65535) {
                     LOG_WARN("Channel %d (id=%u): max_sessions %d exceeds 65535, capping",
-                             config->channel_count, ch_cfg->channel_id, ms);
-                    ch_cfg->max_sessions = 65535;
+                             config->channel_count, base_cfg.channel_id, ms);
+                    base_cfg.max_sessions = 65535;
                 } else {
-                    ch_cfg->max_sessions = (ms > 0) ? (uint16_t)ms : 1;
+                    base_cfg.max_sessions = (ms > 0) ? (uint16_t)ms : 1;
                 }
             } else {
-                ch_cfg->max_sessions = 1;
+                base_cfg.max_sessions = 1;
             }
 
             /* 客户端 IP/端口 ACL */
-            parse_acl(ch_obj, &ch_cfg->client_acl);
+            parse_acl(ch_obj, &base_cfg.client_acl);
 
-            config->channel_count++;
+            if ((uint64_t)base_cfg.channel_id + range_len - 1 > UINT32_MAX) {
+                LOG_ERROR("Channel %d (id=%u): expanded channel_id range overflows",
+                          config->channel_count, base_cfg.channel_id);
+                goto cleanup;
+            }
+
+            if ((uint32_t)config->channel_count + range_len > MAX_CHANNELS) {
+                LOG_ERROR("Too many channels after range expansion (%u), max is %d",
+                          (uint32_t)config->channel_count + range_len,
+                          MAX_CHANNELS);
+                goto cleanup;
+            }
+
+            for (uint32_t offset = 0; offset < range_len; offset++) {
+                channel_config_t *ch_cfg = &config->channels[config->channel_count];
+                *ch_cfg = base_cfg;
+                ch_cfg->channel_id = base_cfg.channel_id + offset;
+                ch_cfg->listen_port = (uint16_t)(listen_start + offset);
+                ch_cfg->remote_port = (uint16_t)(remote_start + offset);
+                config->channel_count++;
+            }
         }
     }
 
@@ -1009,6 +1208,10 @@ static void config_reload_channels(global_ctx_t *ctx,
                           new_ch->channel_id);
                 continue;
             }
+            if (ensure_listener_fd_budget(ctx, 1, "config_reload",
+                                          new_ch->channel_id) != 0) {
+                continue;
+            }
 
             channel_t *ch = channel_create(ctx, new_ch->channel_id,
                                            CHANNEL_ROLE_LISTENER,
@@ -1261,6 +1464,9 @@ static int channel_ctl_add(global_ctx_t *ctx, const channel_config_t *cfg)
     if (ctx->config.node_type == NODE_TYPE_FRONTEND &&
         proxy_port_conflict(ctx, cfg->listen_addr, cfg->listen_port, 0)) {
         LOG_ERROR("ctl_add: port %s:%u already in use", cfg->listen_addr, cfg->listen_port);
+        return -1;
+    }
+    if (ensure_listener_fd_budget(ctx, 1, "ctl_add", cfg->channel_id) != 0) {
         return -1;
     }
     channel_t *ch = channel_create(ctx, cfg->channel_id, CHANNEL_ROLE_LISTENER,
@@ -1591,6 +1797,13 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 13. 创建通道并为每个通道启动代理监听
      * ================================================================ */
+    if (g_ctx->config.node_type == NODE_TYPE_FRONTEND &&
+        ensure_listener_fd_budget(g_ctx, g_ctx->config.channel_count,
+                                  "startup", 0) != 0) {
+        cleanup(g_ctx);
+        return 1;
+    }
+
     for (int i = 0; i < g_ctx->config.channel_count; i++) {
         channel_config_t *ch_cfg = &g_ctx->config.channels[i];
 

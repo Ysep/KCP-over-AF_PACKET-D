@@ -123,6 +123,50 @@ static int proxy_close_read_side(global_ctx_t *ctx, channel_t *ch,
     return PROXY_LOCAL_READ_CLOSED;
 }
 
+static int proxy_finish_async_connect(channel_t *ch)
+{
+    int       so_err = 0;
+    socklen_t so_len = sizeof(so_err);
+
+    if (!ch) {
+        return -1;
+    }
+
+    if (!ch->connect_pending) {
+        return 0;
+    }
+
+    if (getsockopt(ch->local_fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) < 0) {
+        LOG_ERROR("proxy_finish_async_connect: getsockopt(SO_ERROR) failed "
+                  "(fd=%d, channel=%u): %s",
+                  ch->local_fd, ch->channel_id, strerror(errno));
+        return -1;
+    }
+
+    if (so_err != 0) {
+        if (so_err == ECONNREFUSED ||
+            so_err == EHOSTUNREACH ||
+            so_err == ENETUNREACH ||
+            so_err == ETIMEDOUT) {
+            LOG_DEBUG("proxy_finish_async_connect: expected connect failure "
+                      "(fd=%d, channel=%u): %s",
+                      ch->local_fd, ch->channel_id, strerror(so_err));
+        } else {
+            LOG_INFO("proxy_finish_async_connect: async connect failed "
+                     "(fd=%d, channel=%u): %s",
+                     ch->local_fd, ch->channel_id, strerror(so_err));
+        }
+        errno = so_err;
+        return -1;
+    }
+
+    ch->connect_pending = 0;
+    LOG_DEBUG("proxy_finish_async_connect: async connect completed "
+              "(fd=%d, channel=%u)",
+              ch->local_fd, ch->channel_id);
+    return 0;
+}
+
 /*
  * 查找 local_fd 或 listen_fd 匹配的通道。
  * 扫描哈希表 - O(n)，但 n ≤ MAX_CHANNELS (256)，实际使用中开销可忽略。
@@ -929,17 +973,8 @@ int proxy_handle_local_write(channel_t *ch)
 
     if (ch->recv_buf_len == 0) {
         /* 检查异步 connect 是否成功完成（首次 EPOLLOUT 到达时） */
-        if (ch->connect_pending) {
-            int       so_err = 0;
-            socklen_t so_len = sizeof(so_err);
-            if (getsockopt(ch->local_fd, SOL_SOCKET, SO_ERROR, &so_err, &so_len) == 0
-                && so_err != 0) {
-                LOG_ERROR("proxy_handle_local_write: async connect failed "
-                          "(fd=%d, channel=%u): %s",
-                          ch->local_fd, ch->channel_id, strerror(so_err));
-                return -1;
-            }
-            ch->connect_pending = 0;
+        if (proxy_finish_async_connect(ch) < 0) {
+            return -1;
         }
         /* 没有待发送数据 */
         return 0;
@@ -1496,6 +1531,20 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
 
     } else {
         /* ---- 本地连接套接字事件 ---- */
+
+        if (ch->connect_pending &&
+            (events & (EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP))) {
+            ret = proxy_finish_async_connect(ch);
+            if (ret < 0) {
+                proxy_close_local(ch);
+                channel_send_ctrl(ch, MPF_RST);
+                ch->state = CHANNEL_CLOSED;
+                if (!(ch->flags & CH_FLAG_STATIC_LISTENER)) {
+                    channel_destroy(ctx, ch);
+                }
+                return 0;
+            }
+        }
 
         /*
          * EPOLLIN 优先于 EPOLLHUP/EPOLLERR 处理：

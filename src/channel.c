@@ -490,8 +490,9 @@ channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
         return NULL;
     }
 
-    /* 速率限制：防 SYN flood */
-    if (ctx->channel_create_max_per_sec > 0) {
+    /* 速率限制：仅针对运行期动态通道，静态 LISTENER 不受此限制 */
+    if (role != CHANNEL_ROLE_LISTENER &&
+        ctx->channel_create_max_per_sec > 0) {
         uint32_t now = (uint32_t)time(NULL);
         if (now != ctx->channel_create_timestamp) {
             ctx->channel_create_timestamp = now;
@@ -996,10 +997,10 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
 
             ch = channel_find(ctx, hdr->channel_id);
             if (!ch) {
-                LOG_ERROR("channel_process_frame: "
-                          "ACK for unknown channel %u, dropping",
+                LOG_DEBUG("channel_process_frame: "
+                          "late ACK for unknown channel %u, dropping",
                           hdr->channel_id);
-                return -1;
+                return 0;
             }
 
             if (ch->state == CHANNEL_SYN_SENT) {
@@ -1873,6 +1874,12 @@ void channel_close_all(global_ctx_t *ctx)
 
         while (ch) {
             channel_t *next = ch->hash_next;
+
+            if ((ch->flags & CH_FLAG_STATIC_LISTENER) ||
+                ch->role == CHANNEL_ROLE_LISTENER) {
+                ch = next;
+                continue;
+            }
 
             if (ch->state == CHANNEL_ESTABLISHED) {
                 LOG_DEBUG("channel_close_all: sending FIN to channel %u",

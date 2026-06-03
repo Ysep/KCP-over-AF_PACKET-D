@@ -736,6 +736,29 @@ cleanup:
     return;
 }
 
+/* Test 21b: channel_process_frame: late ACK on destroyed dynamic channel */
+static void test_channel_late_ack_unknown_ignored(void)
+{
+    TEST("Channel state: late ACK on unknown channel is ignored");
+    static global_ctx_t ctx;
+    myproto_hdr_t hdr;
+    int ret;
+
+    CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
+
+    fill_ctrl_hdr(&hdr, 65541, MPF_ACK);
+    ret = channel_process_frame(&ctx, &hdr, NULL, 0);
+    CHECK(ret == 0, "late ACK for unknown channel should be ignored");
+
+    channel_shutdown(&ctx);
+    PASS();
+    return;
+
+cleanup:
+    channel_shutdown(&ctx);
+    return;
+}
+
 /* Test 22: channel_process_frame: FIN on ESTABLISHED → FIN_RCVD */
 static void test_channel_fin_on_established(void)
 {
@@ -2008,6 +2031,76 @@ static void test_channel_create_duplicate_id(void)
 
     found = channel_find(&ctx, 30010);
     CHECK(found == ch1, "find must return original channel, not NULL");
+
+    channel_shutdown(&ctx);
+    PASS();
+    return;
+
+cleanup:
+    channel_shutdown(&ctx);
+    return;
+}
+
+/* Test 61b: static LISTENER creation bypasses runtime rate limit */
+static void test_channel_listener_bypasses_rate_limit(void)
+{
+    TEST("channel_create LISTENER bypasses rate limit");
+    static global_ctx_t ctx;
+    channel_t *listener = NULL;
+    channel_t *initiator = NULL;
+
+    CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
+
+    ctx.channel_create_max_per_sec = 1;
+    ctx.channel_create_timestamp = (uint32_t)time(NULL);
+    ctx.channel_create_count = 1;
+
+    initiator = channel_create(&ctx, 30011, CHANNEL_ROLE_INITIATOR,
+                               8080, 9090, "0.0.0.0", "10.0.0.1", 1);
+    CHECK(initiator == NULL, "initiator should hit rate limit");
+
+    listener = channel_create(&ctx, 30012, CHANNEL_ROLE_LISTENER,
+                              8081, 9091, "0.0.0.0", "10.0.0.2", 1);
+    CHECK(listener != NULL, "listener should bypass rate limit");
+    CHECK(listener->state == CHANNEL_ESTABLISHED,
+          "listener should initialize successfully");
+
+    channel_shutdown(&ctx);
+    PASS();
+    return;
+
+cleanup:
+    channel_shutdown(&ctx);
+    return;
+}
+
+/* Test 61c: close_all must skip static LISTENER control frames */
+static void test_channel_close_all_skips_static_listener(void)
+{
+    TEST("channel_close_all skips static LISTENER");
+    static global_ctx_t ctx;
+    channel_t *listener = NULL;
+    channel_t *peer = NULL;
+
+    CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
+
+    listener = channel_create(&ctx, 30013, CHANNEL_ROLE_LISTENER,
+                              8082, 9092, "0.0.0.0", "10.0.0.3", 1);
+    CHECK(listener != NULL, "listener create failed");
+    listener->flags |= CH_FLAG_STATIC_LISTENER;
+    listener->state = CHANNEL_ESTABLISHED;
+
+    peer = channel_create(&ctx, 30014, CHANNEL_ROLE_RESPONDER,
+                          8083, 9093, "0.0.0.0", "10.0.0.4", 1);
+    CHECK(peer != NULL, "peer create failed");
+    peer->state = CHANNEL_ESTABLISHED;
+
+    channel_close_all(&ctx);
+
+    CHECK(listener->state == CHANNEL_ESTABLISHED,
+          "static listener must not enter FIN_SENT during cleanup");
+    CHECK(peer->state == CHANNEL_FIN_SENT,
+          "data channel should still enter FIN_SENT during cleanup");
 
     channel_shutdown(&ctx);
     PASS();
@@ -3392,6 +3485,7 @@ int main(void)
     test_channel_state_listener_established();
     test_channel_syn_creates_responder();
     test_channel_ack_on_syn_sent();
+    test_channel_late_ack_unknown_ignored();
     test_channel_fin_on_established();
     test_channel_rst_closes();
     test_channel_data_on_closed();
@@ -3437,6 +3531,8 @@ int main(void)
     test_channel_multiple_findable();
     test_channel_hash_collision();
     test_channel_create_duplicate_id();
+    test_channel_listener_bypasses_rate_limit();
+    test_channel_close_all_skips_static_listener();
 
     print_banner("channel_update_config & Reload (Tests 61-70)");
     test_update_config_listen_port();

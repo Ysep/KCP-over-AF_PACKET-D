@@ -1,5 +1,29 @@
 # 代码变动记录
 
+## 2026-06-03 14:02 新增端口范围配置注意事项文档
+
+Commit: ba61044
+
+### 背景
+
+在连续端口范围扩展到数百、数千乃至数万端口时，实际遇到的问题已经不只是配置语法本身，还包括：
+
+- frontend 监听 socket 的 fd 上限
+- `nmap -sT` 等扫描触发的运行期动态通道创建限速
+- 超大范围配置的实际可用性判断
+
+这些注意点之前分散在变更记录和对话结论里，没有单独文档可供部署时直接参考。
+
+### 变更
+
+- 新增 `docs/PORT_RANGE_NOTES.md`
+- 汇总端口范围展开规则、frontend/backend 差异、fd 上限、动态通道 `1000/sec` 限速和推荐范围
+- 补充适合当前实现的建议配置：`9100-9599` 和 `9100-9899`
+
+### 验证
+
+本次仅新增文档，无代码变更，无需重新编译或执行测试。
+
 ## 2026-06-02 修复 SSH 退出后动态通道占用
 
 Commit: `0e6dd92`
@@ -23,6 +47,52 @@ Commit: `0e6dd92`
 - `channel_process_frame()` 改用 `KCP_APP_RECV_BUF_SIZE` 读取 KCP 重组数据，避免 SSH 大块数据触发 `ikcp_recv -2`。
 - `proxy_handle_local_read()` 将 `ECONNRESET` 视为本地连接已关闭：记录 `INFO`、关闭本地 fd、发送 `RST`、销毁动态通道。
 - `proxy_handle_event()` 识别本地读路径已释放动态通道的返回码，立即返回，避免继续访问已释放的 `channel_t`。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
+
+## 2026-06-03 13:46 前端监听 FD 预算预检与静态 listener 关闭清理修正
+
+Commit: 07a9ae4
+
+### 背景
+
+服务器 B 使用超大连续端口范围：
+
+```json
+"listen_port_range": "9100-54326",
+"remote_port_range": "9100-54326"
+```
+
+仍会在 frontend 启动监听阶段报错：
+
+- `proxy_start_listen: socket(TCP) failed: Too many open files`
+- `Failed to start listen for channel id=1020`
+
+随后清理阶段又继续出现：
+
+- `af_packet_send: sendto failed ... Resource temporarily unavailable`
+- `channel_close_all: failed to send FIN to channel ...`
+
+### 根因
+
+- frontend 每个静态 TCP 监听端口都需要一个独立监听 socket。`9100-54326` 会展开为 45227 个 listener，远超常见进程 `RLIMIT_NOFILE` 软限制，因此 `socket()` 在启动到一部分端口后必然触发 `EMFILE`。
+- 启动失败进入清理路径时，`channel_close_all()` 还会把静态 `CHANNEL_ROLE_LISTENER` 当作普通已建立通道发送 FIN/RST，进一步制造无意义的 AF_PACKET 发送压力和连带错误日志。
+
+### 变更
+
+- 在 frontend 启动、热重载新增通道、`ctl add` 新增通道前，新增 `RLIMIT_NOFILE` 预算预检。
+- 预检会结合当前已打开 fd 数、待新增 listener 数和保留余量，提前报出明确错误，提示缩小 `listen_port_range` 或提高 `ulimit -n`。
+- `channel_close_all()` 现在跳过静态 listener 和 `CHANNEL_ROLE_LISTENER`，清理时只对真实会话通道发送 FIN/RST。
+- 新增回归测试，验证 `channel_close_all()` 不会把静态 listener 错误推进到 `FIN_SENT`。
 
 ### 验证
 
@@ -298,6 +368,244 @@ Commit: `d2fbaef`
 已执行：
 
 ```bash
+make
+make test
+```
+
+结果：全部通过。
+
+## 2026-06-03 10:35 忽略动态通道关闭后的延迟 ACK
+
+Commit: 20f64f7
+
+### 背景
+
+服务器 A 执行连接扫描：
+
+```bash
+nmap -sT 192.168.1.198 -p 5201
+```
+
+服务器 B 在接受新会话后，本地 TCP 连接很快被扫描端 reset：
+
+- `proxy_accept: new session chan=65541 fd=6 (listener=1)`
+- `proxy_handle_local_read: connection reset by peer on fd=6 (channel=65541), closing session`
+- `channel_process_frame: ACK for unknown channel 65541, dropping`
+
+### 根因
+
+`nmap -sT` 的 TCP connect 扫描会建立连接后快速关闭或 reset。本端收到 `ECONNRESET` 后会通过本地读侧关闭路径发送 RST 并销毁动态通道。此时对端已经发出的 ACK 控制帧可能仍在 AF_PACKET 链路上，晚到后 `channel_process_frame()` 找不到对应 channel，原逻辑把该竞态按 ERROR 返回。
+
+该 ACK 属于关闭竞态中的延迟控制帧，行为上应与未知 FIN/RST、关闭后的延迟 DATA 一样被静默丢弃，不应污染错误日志，也不应向上层返回失败。
+
+### 变更
+
+- `channel_process_frame()` 收到未知通道的 ACK 时改为 `DEBUG` 级别记录 `late ACK for unknown channel ...`，并返回成功。
+- 新增回归测试覆盖 destroyed/unknown dynamic channel 收到 ACK 的路径。
+
+### 验证
+
+已执行：
+
+```bash
+make test-integ5
+make
+```
+
+结果：全部通过。
+
+## 2026-06-03 11:33 增加端口范围配置语法
+
+Commit: 4cf690a
+
+### 背景
+
+连续代理多个端口时，原配置必须在 `channels[]` 中逐条手写每个端口映射。例如代理 `5201-5203` 需要写 3 条 channel；端口数量增加时配置冗长，也更容易出现 `channel_id`、监听端口或远端端口不连续的人工错误。
+
+### 根因
+
+配置解析只支持单个 `listen_port` 和 `remote_port` 字段，没有端口范围语法。运行时通道和热重载已经基于展开后的 `channels[]` 工作，因此更合适的实现方式是在 `config_load()` 阶段把范围配置展开为多条现有 `channel_config_t`，保持代理、通道状态机和动态会话分配逻辑不变。
+
+### 变更
+
+- 新增 `listen_port_range` 配置字段，支持 `"5201-5203"` 和 `[5201, 5203]` 两种写法。
+- 新增 `remote_port_range` 配置字段；也支持只写 `remote_port` 作为起始端口，按监听范围偏移自动递增。
+- 端口范围展开时，`channel_id` 作为起始 ID，内部通道按 `channel_id + offset` 递增。
+- 增加范围合法性检查：端口范围必须在 `1-65535`，起止顺序必须有效，监听范围和远端范围长度必须一致，展开数量不能超过 `MAX_CHANNELS`。
+- 新增配置加载回归测试，验证 `listen_port_range` 能展开为多条通道，并正确递增 `channel_id`、`listen_port` 和 `remote_port`。
+- 更新 `docs/CONFIG.md` 和 `docs/DEPLOYMENT.md`，记录新语法和示例。
+- 重新编译 `kcp-afpacket` 主二进制。
+
+### 验证
+
+已执行：
+
+```bash
+make test-integ
+make
+make test
+```
+
+结果：全部通过。
+
+## 2026-06-03 12:05 新增端口范围配置示例
+
+Commit: 7786cb7
+
+### 背景
+
+端口范围功能已经支持 `listen_port_range` 和 `remote_port_range`，但 `sample` 目录里仍只有单端口配置示例。使用新功能时，用户需要一个可直接参考的前后端配置样例，尤其是与你当前 B/C 拓扑一致的 `54320-54326` 连续端口代理场景。
+
+### 变更
+
+- 新增 `sample/config-node-b-port-range.json`，提供 frontend 端口范围代理示例。
+- 新增 `sample/config-node-c-port-range.json`，提供 backend 对应配置示例。
+- 两个示例均使用 `listen_port_range: "54320-54326"` 和 `remote_port_range: "54320-54326"`，并保留 `max_sessions: 256`。
+
+### 验证
+
+已执行：
+
+```bash
+python3 -m json.tool sample/config-node-b-port-range.json
+python3 -m json.tool sample/config-node-c-port-range.json
+make
+```
+
+结果：全部通过。
+
+## 2026-06-03 12:23 补充 remote_port 起始端口递增样例
+
+Commit: 81e3471
+
+### 背景
+
+此前新增的 `sample/config-node-*-port-range.json` 仅展示了显式 `remote_port_range` 的写法，没有覆盖 `listen_port_range` 搭配单个 `remote_port` 起始端口、由加载器自动按偏移递增远端端口的用法。
+
+### 变更
+
+- 新增 `sample/config-node-b-port-range-base-remote.json`，展示 frontend 侧使用 `listen_port_range: "5201-5203"` 与 `remote_port: 5201` 的配置。
+- 新增 `sample/config-node-c-port-range-base-remote.json`，展示 backend 对应配置。
+- 两个样例都使用 `channel_id: 100` 作为展开起始 ID，对应内部展开为 `100/101/102`。
+
+### 验证
+
+已执行：
+
+```bash
+python3 -m json.tool sample/config-node-b-port-range-base-remote.json
+python3 -m json.tool sample/config-node-c-port-range-base-remote.json
+make
+```
+
+结果：全部通过。
+
+## 2026-06-03 12:23 修正异步 connect 失败的事件处理顺序
+
+Commit: 7748cc6
+
+### 背景
+
+服务器 C 使用端口范围配置时，服务器 A 执行：
+
+```bash
+nmap -sT -p 54320-55326 192.168.1.198
+```
+
+后端日志出现：
+
+- `proxy_connect_remote: connecting to 192.168.1.67:54321 ...`
+- `proxy_handle_local_read: read(fd=5) ended with No route to host ...`
+
+这类日志出现在目标端口不可达或路由失败的收尾阶段，容易误导为“本地读错误”，而不是“异步 connect 失败”。
+
+### 根因
+
+后端 `proxy_connect_remote()` 对目标服务使用非阻塞 `connect()`。当连接还处于 `connect_pending` 时，`proxy_handle_event()` 先按 `EPOLLIN` 调用 `proxy_handle_local_read()`，而没有先通过 `getsockopt(SO_ERROR)` 确认异步连接结果。内核把连接失败通过事件返回时，当前代码就把它错误归类成了读路径上的 `No route to host`。
+
+### 变更
+
+- 新增异步连接完成辅助逻辑，统一通过 `getsockopt(SO_ERROR)` 确认 `connect_pending` 套接字的结果。
+- `proxy_handle_event()` 在处理 `EPOLLIN/EPOLLOUT/EPOLLERR/EPOLLHUP` 前，若通道仍处于 `connect_pending`，优先完成连接状态确认。
+- 连接失败时直接按会话关闭路径处理，不再先落入 `proxy_handle_local_read()` 并输出误导性的 `read(...): No route to host` 日志。
+- `proxy_handle_local_write()` 复用同一套异步连接确认逻辑，避免写路径和事件路径重复维护。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
+
+## 2026-06-03 12:36 降低预期连接失败日志级别
+
+Commit: c4044e0
+
+### 背景
+
+修正异步连接事件顺序后，`nmap -sT` 扫描范围端口时，后端日志不再错误显示 `proxy_handle_local_read: ... No route to host`，但仍会在 `INFO` 级别输出：
+
+- `proxy_finish_async_connect: async connect failed ... No route to host`
+
+对于扫描命中不存在或不可达的后端目标端口，这类连接失败是预期结果，不属于代理自身错误。
+
+### 变更
+
+- 将 `ECONNREFUSED`、`EHOSTUNREACH`、`ENETUNREACH`、`ETIMEDOUT` 这类预期的异步连接失败从 `INFO` 降级为 `DEBUG`。
+- 保留其它非预期异步连接失败为 `INFO`，便于继续观察真实异常。
+- 不改变失败时的会话收尾逻辑，仍然关闭本地 fd、发送 RST 并销毁动态通道。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
+
+## 2026-06-03 12:47 静态端口范围启动不再触发创建限速
+
+Commit: 8ef72b7
+
+### 背景
+
+将配置改为：
+
+```json
+"listen_port_range": "9100-54326",
+"remote_port_range": "9100-54326"
+```
+
+后，启动阶段需要一次性展开并创建大量静态 listener。此前启动到第 1001 个通道时会报：
+
+- `channel_create: rate limit exceeded (1000/sec)`
+- `Failed to create channel id=1001`
+
+随后清理阶段又伴随 AF_PACKET 发送缓冲相关错误日志。
+
+### 根因
+
+`channel_create()` 的每秒 1000 个通道创建限速原本用于运行期动态通道创建的防护，但实现上同样作用于启动阶段的静态 `CHANNEL_ROLE_LISTENER` 创建。端口范围展开为数万条静态 listener 后，会在进程启动的同一秒内命中该限速，导致配置合法却无法完成初始化。
+
+### 变更
+
+- 将通道创建限速收窄到非 `CHANNEL_ROLE_LISTENER` 的运行期通道创建。
+- 静态 listener 的启动和热重载创建不再受 `1000/sec` 限速影响。
+- 新增回归测试，验证在同一秒内已达到限速计数时，`INITIATOR` 仍会被限速，而 `LISTENER` 可以继续成功创建。
+
+### 验证
+
+已执行：
+
+```bash
+make test-integ5
 make
 make test
 ```

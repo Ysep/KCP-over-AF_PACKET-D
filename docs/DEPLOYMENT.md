@@ -382,8 +382,8 @@ PID 文件路径。用于防止同一配置文件的多实例运行。
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `channel_id` | int | 是 | 通道 ID（1-65535），两端必须对应相同 |
-| `listen_port` | int | 是 | 本地监听端口 |
-| `remote_port` | int | 是 | 远端目标端口 |
+| `listen_port` / `listen_port_range` | int / string | 是，二选一 | 本地监听端口；连续端口可写 `"5201-5203"` |
+| `remote_port` / `remote_port_range` | int / string | 是，二选一 | 远端目标端口；范围长度需与监听范围一致 |
 | `listen_addr` | string | 是 | 本地监听地址（如 `"127.0.0.1"` 或 `"0.0.0.0"`） |
 | `remote_addr` | string | 是 | 远端目标地址 |
 | `is_tcp` | bool | 是 | `true`=TCP，`false`=UDP |
