@@ -37,7 +37,7 @@ make test
 
 ## 2026-06-03 13:46 前端监听 FD 预算预检与静态 listener 关闭清理修正
 
-Commit: bd3c66b
+Commit: 07a9ae4
 
 ### 背景
 
