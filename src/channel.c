@@ -1101,10 +1101,10 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
 
             ch = channel_find(ctx, hdr->channel_id);
             if (!ch) {
-                LOG_ERROR("channel_process_frame: "
-                          "PING for unknown channel %u, dropping",
+                LOG_DEBUG("channel_process_frame: "
+                          "late PING for unknown channel %u, dropping",
                           hdr->channel_id);
-                return -1;
+                return 0;
             }
 
             /* 仅对已建立连接的通道回复 PONG */
@@ -1127,10 +1127,10 @@ int channel_process_frame(global_ctx_t *ctx, const myproto_hdr_t *hdr,
 
             ch = channel_find(ctx, hdr->channel_id);
             if (!ch) {
-                LOG_ERROR("channel_process_frame: "
-                          "PONG for unknown channel %u, dropping",
+                LOG_DEBUG("channel_process_frame: "
+                          "late PONG for unknown channel %u, dropping",
                           hdr->channel_id);
-                return -1;
+                return 0;
             }
 
             ch->last_peer_seen = now;

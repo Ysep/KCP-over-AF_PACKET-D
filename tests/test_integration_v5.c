@@ -759,6 +759,33 @@ cleanup:
     return;
 }
 
+/* Test 21c: channel_process_frame: late PING/PONG on destroyed dynamic channel */
+static void test_channel_late_heartbeat_unknown_ignored(void)
+{
+    TEST("Channel state: late PING/PONG on unknown channel is ignored");
+    static global_ctx_t ctx;
+    myproto_hdr_t hdr;
+    int ret;
+
+    CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
+
+    fill_ctrl_hdr(&hdr, 65538, MPF_PING);
+    ret = channel_process_frame(&ctx, &hdr, NULL, 0);
+    CHECK(ret == 0, "late PING for unknown channel should be ignored");
+
+    fill_ctrl_hdr(&hdr, 65538, MPF_PONG);
+    ret = channel_process_frame(&ctx, &hdr, NULL, 0);
+    CHECK(ret == 0, "late PONG for unknown channel should be ignored");
+
+    channel_shutdown(&ctx);
+    PASS();
+    return;
+
+cleanup:
+    channel_shutdown(&ctx);
+    return;
+}
+
 /* Test 22: channel_process_frame: FIN on ESTABLISHED → FIN_RCVD */
 static void test_channel_fin_on_established(void)
 {
@@ -3486,6 +3513,7 @@ int main(void)
     test_channel_syn_creates_responder();
     test_channel_ack_on_syn_sent();
     test_channel_late_ack_unknown_ignored();
+    test_channel_late_heartbeat_unknown_ignored();
     test_channel_fin_on_established();
     test_channel_rst_closes();
     test_channel_data_on_closed();
