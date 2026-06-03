@@ -288,6 +288,29 @@ void kcp_wrap_update(struct IKCPCB *kcp, IUINT32 current_ms)
 }
 
 /*
+ * 立即刷新 KCP 输出队列。
+ *
+ * ikcp_flush() 只要求 KCP 至少 update 过一次。首次发送时如果还未进入
+ * 周期 update，则先执行一次 ikcp_update() 初始化内部时间基准；后续发送
+ * 直接更新 current 并 flush，避免高吞吐场景攒到 10ms 周期后突发发送。
+ */
+void kcp_wrap_flush(struct IKCPCB *kcp, IUINT32 current_ms)
+{
+    if (!kcp) {
+        LOG_ERROR("kcp_wrap_flush: null kcp pointer");
+        return;
+    }
+
+    if (kcp->updated == 0) {
+        ikcp_update(kcp, current_ms);
+        return;
+    }
+
+    kcp->current = current_ms;
+    ikcp_flush(kcp);
+}
+
+/*
  * 获取 KCP 等待发送的字节数
  */
 int kcp_wrap_waitsnd(struct IKCPCB *kcp)

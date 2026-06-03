@@ -1461,6 +1461,12 @@ int channel_send_data(channel_t *ch, const uint8_t *data, size_t len)
         return -1;
     }
 
+    /*
+     * 立即刷新，避免高吞吐场景将大量 KCP 段攒到 10ms 周期后突发发送。
+     * 周期 update 仍负责 ACK、重传和超时驱动。
+     */
+    kcp_wrap_flush(ch->kcp, kcp_wrap_clock());
+
     /* 更新最后活跃时间（数据入队即视为活跃） */
     ch->last_active = time_now();
 

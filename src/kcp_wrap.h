@@ -97,6 +97,13 @@ int kcp_wrap_input(struct IKCPCB *kcp, const uint8_t *data, int len);
 void kcp_wrap_update(struct IKCPCB *kcp, IUINT32 current_ms);
 
 /*
+ * 立即刷新 KCP 输出队列
+ * @param kcp         KCP 实例指针
+ * @param current_ms  当前时间戳（毫秒）
+ */
+void kcp_wrap_flush(struct IKCPCB *kcp, IUINT32 current_ms);
+
+/*
  * 获取 KCP 等待发送的字节数
  * @param kcp KCP 实例指针
  * @return    等待发送的字节数
