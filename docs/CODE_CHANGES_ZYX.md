@@ -708,3 +708,37 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 16:23 处理 AF_PACKET 发送缓冲暂满
+
+Commit: `4a7c537`
+
+### 背景
+
+服务器 A 执行 `iperf3 -c 192.168.1.198 -P 10 -t 10` 时，服务器 B 出现大量：
+
+- `af_packet_send: sendto failed ... Resource temporarily unavailable`
+- `kcp_output_cb: af_packet_send failed ... Resource temporarily unavailable`
+
+### 根因
+
+`iperf3 -P 10` 并发流量会短时间内打满 AF_PACKET 原始 socket 发送缓冲。`sendto()` 返回 `EAGAIN/EWOULDBLOCK` 表示暂时不可写，是发送侧背压，不是永久错误。原逻辑按 ERROR 记录并计入通道发送错误，导致日志刷屏。
+
+### 变更
+
+- 将 AF_PACKET 发送/接收 socket 缓冲区提升到 4 MiB，降低并发发送下触发 `EAGAIN` 的概率。
+- `af_packet_send()` 对 `EAGAIN/EWOULDBLOCK` 降级为 `DEBUG`，保留 errno 返回给上层。
+- `kcp_output_cb()` 对 AF_PACKET 发送缓冲暂满按可恢复背压处理，不再输出 ERROR，也不计入 `tx_errors`。
+- 保留其它 `sendto()` 失败为 ERROR。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
