@@ -742,3 +742,35 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 16:28 避免 EOF 后重复处理本地错误事件
+
+Commit: `9f9ba46`
+
+### 背景
+
+服务器 A 执行 `iperf3 -c 192.168.1.198 -P 10 -t 10` 时，服务器 C 在多个通道上出现先 EOF 后 ERROR 的日志：
+
+- `proxy_handle_local_read: EOF on fd=8 (channel=65539), starting graceful close`
+- `proxy_handle_event: error on local_fd=8 (channel=65539, events=0x19)`
+
+### 根因
+
+`events=0x19` 同时包含 `EPOLLIN|EPOLLERR|EPOLLHUP`。事件层先处理 `EPOLLIN`，读到 EOF 后已经关闭 local fd 并进入优雅关闭，但随后仍继续处理同一事件中的 `EPOLLERR`，把正常收尾误报为 ERROR。
+
+### 变更
+
+- `proxy_handle_event()` 在 `EPOLLIN` 处理后，如果 local fd 已关闭，立即返回，不再继续处理同一事件中的 ERR/HUP。
+- 本地连接事件中优先处理 `EPOLLHUP`，再处理单独的 `EPOLLERR`，避免 `HUP|ERR` 组合被误判为硬错误。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
