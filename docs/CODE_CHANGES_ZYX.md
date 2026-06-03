@@ -611,3 +611,35 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 15:35 忽略未知通道滞后心跳
+
+Commit: `0d9d56e`
+
+### 背景
+
+服务器 A 执行 `iperf3 -c 192.168.1.198 -P 1 -t 10` 时，服务器 B 出现：
+
+- `channel_process_frame: PING for unknown channel 65538, dropping`
+
+### 根因
+
+iperf3 连接收尾后，动态通道可能已经被 RST/FIN 路径销毁，但对端之前排队的通道级心跳帧仍可能延迟到达。`ACK/FIN/RST` 对未知通道已按延迟控制帧忽略，只有 `PING/PONG` 仍按错误返回，导致关闭竞态下输出 ERROR。
+
+### 变更
+
+- 未知通道的 `PING` 从 `ERROR` 降级为 `DEBUG`，并返回成功。
+- 未知通道的 `PONG` 同样按延迟心跳忽略，不再返回错误。
+- 新增 v5 集成测试，覆盖 unknown channel 的 late `PING/PONG` 都应返回 0。
+- 本次提交同时按要求纳入当前已变动文件。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
