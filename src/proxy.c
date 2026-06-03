@@ -1634,17 +1634,10 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
                 }
                 return 0;
             }
-        }
 
-        if (events & EPOLLERR) {
-            LOG_ERROR("proxy_handle_event: error on local_fd=%d "
-                      "(channel=%u, events=0x%x)",
-                      fd, ch->channel_id, events);
-            proxy_close_local(ch);
-            channel_send_ctrl(ch, MPF_RST);
-            ch->state = CHANNEL_CLOSED;
-            channel_destroy(ctx, ch);
-            return -1;
+            if (ch->local_fd < 0) {
+                return 0;
+            }
         }
 
         if (events & EPOLLHUP) {
@@ -1660,6 +1653,17 @@ int proxy_handle_event(global_ctx_t *ctx, int fd, uint32_t events)
                 ch->last_active = time_now();
             }
             return 0;
+        }
+
+        if (events & EPOLLERR) {
+            LOG_ERROR("proxy_handle_event: error on local_fd=%d "
+                      "(channel=%u, events=0x%x)",
+                      fd, ch->channel_id, events);
+            proxy_close_local(ch);
+            channel_send_ctrl(ch, MPF_RST);
+            ch->state = CHANNEL_CLOSED;
+            channel_destroy(ctx, ch);
+            return -1;
         }
 
         if (events & EPOLLOUT) {
