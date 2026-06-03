@@ -88,13 +88,6 @@
 /* KCP→本地套接字刷新时的栈缓冲区大小 */
 #define PROXY_FLUSH_BUF_SIZE    (64 * 1024)
 
-/* 本地 TCP socket 缓冲区，降低 iperf 大流量下的内核侧背压 */
-#define PROXY_TCP_SOCK_BUF_SIZE (4 * 1024 * 1024)
-
-/* KCP 发送队列背压水位（ikcp_waitsnd 返回等待发送的 KCP 段数） */
-#define KCP_READ_PAUSE_WAITSND  (KCP_SEND_WINDOW * 4)
-#define KCP_READ_RESUME_WAITSND (KCP_SEND_WINDOW * 2)
-
 /* proxy_handle_local_read 已经关闭并释放动态通道 */
 #define PROXY_LOCAL_READ_CLOSED (-2)
 
@@ -113,14 +106,18 @@ static global_ctx_t *g_ctx = NULL;
  * ============================================================================ */
 static void proxy_set_tcp_sockbuf(int fd)
 {
-    int val = PROXY_TCP_SOCK_BUF_SIZE;
+    int val = (g_ctx && g_ctx->config.perf_proxy_tcp_sockbuf > 0)
+                  ? g_ctx->config.perf_proxy_tcp_sockbuf
+                  : PERF_PROXY_TCP_SOCKBUF;
 
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &val, sizeof(val)) < 0) {
         LOG_WARN("proxy_set_tcp_sockbuf: setsockopt(SO_RCVBUF) failed "
                  "(fd=%d, size=%d): %s", fd, val, strerror(errno));
     }
 
-    val = PROXY_TCP_SOCK_BUF_SIZE;
+    val = (g_ctx && g_ctx->config.perf_proxy_tcp_sockbuf > 0)
+              ? g_ctx->config.perf_proxy_tcp_sockbuf
+              : PERF_PROXY_TCP_SOCKBUF;
     if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &val, sizeof(val)) < 0) {
         LOG_WARN("proxy_set_tcp_sockbuf: setsockopt(SO_SNDBUF) failed "
                  "(fd=%d, size=%d): %s", fd, val, strerror(errno));
@@ -1516,8 +1513,15 @@ void proxy_update_kcp_backpressure(global_ctx_t *ctx, channel_t *ch)
         return;
     }
 
+    int pause_waitsnd = (ctx->config.perf_kcp_read_pause_waitsnd > 0)
+                            ? ctx->config.perf_kcp_read_pause_waitsnd
+                            : PERF_KCP_READ_PAUSE_WAITSND;
+    int resume_waitsnd = (ctx->config.perf_kcp_read_resume_waitsnd > 0)
+                             ? ctx->config.perf_kcp_read_resume_waitsnd
+                             : PERF_KCP_READ_RESUME_WAITSND;
+
     if (!(ch->flags & CH_FLAG_KCP_READ_PAUSED) &&
-        pending >= KCP_READ_PAUSE_WAITSND) {
+        pending >= pause_waitsnd) {
         ch->flags |= CH_FLAG_KCP_READ_PAUSED;
         LOG_DEBUG("proxy_update_kcp_backpressure: pause local read "
                   "(channel=%u, waitsnd=%d)", ch->channel_id, pending);
@@ -1526,7 +1530,7 @@ void proxy_update_kcp_backpressure(global_ctx_t *ctx, channel_t *ch)
     }
 
     if ((ch->flags & CH_FLAG_KCP_READ_PAUSED) &&
-        pending <= KCP_READ_RESUME_WAITSND) {
+        pending <= resume_waitsnd) {
         ch->flags &= ~CH_FLAG_KCP_READ_PAUSED;
         LOG_DEBUG("proxy_update_kcp_backpressure: resume local read "
                   "(channel=%u, waitsnd=%d)", ch->channel_id, pending);

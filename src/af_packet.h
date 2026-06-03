@@ -16,6 +16,16 @@
  * ============================================================================ */
 
 /*
+ * 配置 AF_PACKET 性能参数
+ * @param sndbuf        SO_SNDBUF，<=0 使用默认值
+ * @param rcvbuf        SO_RCVBUF，<=0 使用默认值
+ * @param retry_max     EAGAIN/EWOULDBLOCK 最大重试次数，<0 使用默认值
+ * @param retry_wait_ms 每次重试 poll 等待毫秒数，<0 使用默认值
+ */
+void af_packet_configure(int sndbuf, int rcvbuf,
+                         int retry_max, int retry_wait_ms);
+
+/*
  * 创建 AF_PACKET 原始套接字
  * @param if_name   网卡接口名称（如 "eth0"）
  * @param ethertype 自定义 EtherType（网络字节序）

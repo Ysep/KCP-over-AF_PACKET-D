@@ -80,19 +80,16 @@
  * 内部常量
  * ============================================================================ */
 
-/* 高性能套接字缓冲区大小 */
-#define AF_PKT_SOCK_SNDBUF      (16 * 1024 * 1024)
-#define AF_PKT_SOCK_RCVBUF      (16 * 1024 * 1024)
-
 /* /proc/net/packet 行最大长度 */
 #define PROC_NET_PACKET_LINE_MAX 512
 
 /* 单次发送/接收帧硬上限（以太网头 + 有效载荷 + VLAN + 安全余量） */
 #define AF_PKT_MAX_FRAME         (ETH_HDR_SIZE + ETH_MAX_PAYLOAD + 128)
 
-/* AF_PACKET 非阻塞发送短等待重试参数 */
-#define AF_PKT_SEND_RETRY_MAX    8
-#define AF_PKT_SEND_WAIT_MS      1
+static int g_af_packet_sndbuf = PERF_AF_PACKET_SNDBUF;
+static int g_af_packet_rcvbuf = PERF_AF_PACKET_RCVBUF;
+static int g_af_packet_send_retry_max = PERF_AF_PACKET_SEND_RETRY_MAX;
+static int g_af_packet_send_wait_ms = PERF_AF_PACKET_SEND_WAIT_MS;
 
 /* ============================================================================
  * 内部辅助函数
@@ -111,6 +108,17 @@ static void af_packet_set_sockbuf(int sock, int optname, int desired)
                   (optname == SO_SNDBUF) ? "SO_SNDBUF" : "SO_RCVBUF",
                   desired, strerror(errno));
     }
+}
+
+void af_packet_configure(int sndbuf, int rcvbuf,
+                         int retry_max, int retry_wait_ms)
+{
+    g_af_packet_sndbuf = (sndbuf > 0) ? sndbuf : PERF_AF_PACKET_SNDBUF;
+    g_af_packet_rcvbuf = (rcvbuf > 0) ? rcvbuf : PERF_AF_PACKET_RCVBUF;
+    g_af_packet_send_retry_max =
+        (retry_max >= 0) ? retry_max : PERF_AF_PACKET_SEND_RETRY_MAX;
+    g_af_packet_send_wait_ms =
+        (retry_wait_ms >= 0) ? retry_wait_ms : PERF_AF_PACKET_SEND_WAIT_MS;
 }
 
 /*
@@ -181,8 +189,8 @@ int af_packet_create(const char *if_name, uint16_t ethertype, int *ifindex)
     }
 
     /* --- 扩大套接字缓冲区 --- */
-    af_packet_set_sockbuf(sock, SO_SNDBUF, AF_PKT_SOCK_SNDBUF);
-    af_packet_set_sockbuf(sock, SO_RCVBUF, AF_PKT_SOCK_RCVBUF);
+    af_packet_set_sockbuf(sock, SO_SNDBUF, g_af_packet_sndbuf);
+    af_packet_set_sockbuf(sock, SO_RCVBUF, g_af_packet_rcvbuf);
 
     /* --- 获取网卡接口索引 --- */
     idx = af_packet_get_ifindex(sock, if_name);
@@ -321,7 +329,7 @@ ssize_t af_packet_send(int sock, int ifindex,
     uint8_t            frame_buf[AF_PKT_MAX_FRAME];
     size_t             frame_len;
     struct sockaddr_ll sll;
-    ssize_t            sent;
+    ssize_t            sent = -1;
     int                saved_errno;
 
     /* --- 参数校验 --- */
@@ -398,7 +406,7 @@ ssize_t af_packet_send(int sock, int ifindex,
      * 暂满时如果直接返回，会导致 KCP 帧实际丢失，上层 TCP 看到大量重传。
      * 因此对 EAGAIN 做短等待重试，把瞬时背压尽量吸收在发送层。
      */
-    for (int attempt = 0; attempt <= AF_PKT_SEND_RETRY_MAX; attempt++) {
+    for (int attempt = 0; attempt <= g_af_packet_send_retry_max; attempt++) {
         sent = sendto(sock, frame_buf, frame_len, 0,
                       (const struct sockaddr *)&sll, sizeof(sll));
         if (sent >= 0) {
@@ -413,7 +421,7 @@ ssize_t af_packet_send(int sock, int ifindex,
             return -1;
         }
 
-        if (attempt == AF_PKT_SEND_RETRY_MAX) {
+        if (attempt == g_af_packet_send_retry_max) {
             LOG_DEBUG("af_packet_send: send buffer still full after retry "
                       "(ifindex=%d, len=%zu)", ifindex, frame_len);
             errno = saved_errno;
@@ -427,7 +435,7 @@ ssize_t af_packet_send(int sock, int ifindex,
             pfd.fd = sock;
             pfd.events = POLLOUT;
 
-            if (poll(&pfd, 1, AF_PKT_SEND_WAIT_MS) < 0 && errno != EINTR) {
+            if (poll(&pfd, 1, g_af_packet_send_wait_ms) < 0 && errno != EINTR) {
                 saved_errno = errno;
                 LOG_ERROR("af_packet_send: poll(POLLOUT) failed "
                           "(ifindex=%d): %s", ifindex, strerror(saved_errno));

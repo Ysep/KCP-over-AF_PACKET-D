@@ -13,6 +13,7 @@
     "peer_mac":           "<string | "">",
     "local_mac":          "<string | "">",
     "kcp":                { <KCP config> },
+    "performance":        { <Performance config> },
     "node_type":          "frontend" | "backend",
     "max_channels":       <int>,
     "heartbeat_interval": <int>,
@@ -25,6 +26,12 @@
     "channels":           [ <Channel config>, ... ]
 }
 ```
+
+---
+
+## 性能调优配置
+
+影响吞吐、重传和背压的参数集中在顶层 `performance` 对象中。完整说明见 [PERFORMANCE_CONFIG.md](PERFORMANCE_CONFIG.md)。
 
 ---
 

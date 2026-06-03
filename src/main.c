@@ -96,7 +96,6 @@
 #define EPOLL_MAX_EVENTS    64
 #define EPOLL_TIMEOUT_MS    10
 #define PERIODIC_INTERVAL_MS 10
-#define MAX_FRAMES_PER_CYCLE 8192
 #define STATS_INTERVAL_SEC  60
 
 /* ---- 全局上下文指针（信号处理器需要访问） ---- */
@@ -594,6 +593,38 @@ int config_load(const char *path, global_config_t *config)
         config->kcp_nc          = KCP_NC;
     }
 
+    /* ---- performance object ---- */
+    config->perf_af_packet_sndbuf = PERF_AF_PACKET_SNDBUF;
+    config->perf_af_packet_rcvbuf = PERF_AF_PACKET_RCVBUF;
+    config->perf_af_packet_send_retry_max = PERF_AF_PACKET_SEND_RETRY_MAX;
+    config->perf_af_packet_send_wait_ms = PERF_AF_PACKET_SEND_WAIT_MS;
+    config->perf_proxy_tcp_sockbuf = PERF_PROXY_TCP_SOCKBUF;
+    config->perf_kcp_read_pause_waitsnd = PERF_KCP_READ_PAUSE_WAITSND;
+    config->perf_kcp_read_resume_waitsnd = PERF_KCP_READ_RESUME_WAITSND;
+    config->perf_kcp_immediate_flush = PERF_KCP_IMMEDIATE_FLUSH;
+    config->perf_max_frames_per_cycle = PERF_MAX_FRAMES_PER_CYCLE;
+
+    if (json_object_object_get_ex(root, "performance", &obj)) {
+        if (json_object_object_get_ex(obj, "af_packet_sndbuf", &tmp))
+            config->perf_af_packet_sndbuf = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "af_packet_rcvbuf", &tmp))
+            config->perf_af_packet_rcvbuf = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "af_packet_send_retry_max", &tmp))
+            config->perf_af_packet_send_retry_max = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "af_packet_send_wait_ms", &tmp))
+            config->perf_af_packet_send_wait_ms = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "proxy_tcp_sockbuf", &tmp))
+            config->perf_proxy_tcp_sockbuf = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "kcp_read_pause_waitsnd", &tmp))
+            config->perf_kcp_read_pause_waitsnd = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "kcp_read_resume_waitsnd", &tmp))
+            config->perf_kcp_read_resume_waitsnd = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "kcp_immediate_flush", &tmp))
+            config->perf_kcp_immediate_flush = json_object_get_boolean(tmp) ? 1 : 0;
+        if (json_object_object_get_ex(obj, "max_frames_per_cycle", &tmp))
+            config->perf_max_frames_per_cycle = json_object_get_int(tmp);
+    }
+
     /* ---- node_type ---- */
     if (json_object_object_get_ex(root, "node_type", &tmp)) {
         const char *s = json_object_get_string(tmp);
@@ -902,6 +933,74 @@ int validate_config(const global_config_t *config)
     }
     if (config->kcp_nc < 0 || config->kcp_nc > 1) {
         LOG_ERROR("kcp.nc must be 0 or 1, got %d", config->kcp_nc);
+        return -1;
+    }
+
+    /* 性能参数合理性校验 */
+    if (config->perf_af_packet_sndbuf != 0 &&
+        config->perf_af_packet_sndbuf < 4096) {
+        LOG_ERROR("performance.af_packet_sndbuf must be >= 4096, got %d",
+                  config->perf_af_packet_sndbuf);
+        return -1;
+    }
+    if (config->perf_af_packet_rcvbuf != 0 &&
+        config->perf_af_packet_rcvbuf < 4096) {
+        LOG_ERROR("performance.af_packet_rcvbuf must be >= 4096, got %d",
+                  config->perf_af_packet_rcvbuf);
+        return -1;
+    }
+    if (config->perf_af_packet_send_retry_max < 0 ||
+        config->perf_af_packet_send_retry_max > 1000) {
+        LOG_ERROR("performance.af_packet_send_retry_max must be in [0, 1000], got %d",
+                  config->perf_af_packet_send_retry_max);
+        return -1;
+    }
+    if (config->perf_af_packet_send_wait_ms < 0 ||
+        config->perf_af_packet_send_wait_ms > 1000) {
+        LOG_ERROR("performance.af_packet_send_wait_ms must be in [0, 1000], got %d",
+                  config->perf_af_packet_send_wait_ms);
+        return -1;
+    }
+    if (config->perf_proxy_tcp_sockbuf != 0 &&
+        config->perf_proxy_tcp_sockbuf < 4096) {
+        LOG_ERROR("performance.proxy_tcp_sockbuf must be >= 4096, got %d",
+                  config->perf_proxy_tcp_sockbuf);
+        return -1;
+    }
+    if (config->perf_kcp_read_pause_waitsnd < 0) {
+        LOG_ERROR("performance.kcp_read_pause_waitsnd must be >= 0, got %d",
+                  config->perf_kcp_read_pause_waitsnd);
+        return -1;
+    }
+    if (config->perf_kcp_read_resume_waitsnd < 0) {
+        LOG_ERROR("performance.kcp_read_resume_waitsnd must be >= 0, got %d",
+                  config->perf_kcp_read_resume_waitsnd);
+        return -1;
+    }
+    {
+        int pause_waitsnd = (config->perf_kcp_read_pause_waitsnd > 0)
+                                ? config->perf_kcp_read_pause_waitsnd
+                                : PERF_KCP_READ_PAUSE_WAITSND;
+        int resume_waitsnd = (config->perf_kcp_read_resume_waitsnd > 0)
+                                 ? config->perf_kcp_read_resume_waitsnd
+                                 : PERF_KCP_READ_RESUME_WAITSND;
+        if (resume_waitsnd > pause_waitsnd) {
+            LOG_ERROR("performance.kcp_read_resume_waitsnd must be <= pause_waitsnd, got %d > %d",
+                      resume_waitsnd, pause_waitsnd);
+            return -1;
+        }
+    }
+    if (config->perf_kcp_immediate_flush < 0 ||
+        config->perf_kcp_immediate_flush > 1) {
+        LOG_ERROR("performance.kcp_immediate_flush must be 0 or 1, got %d",
+                  config->perf_kcp_immediate_flush);
+        return -1;
+    }
+    if (config->perf_max_frames_per_cycle != 0 &&
+        (config->perf_max_frames_per_cycle < 1 ||
+         config->perf_max_frames_per_cycle > 1000000)) {
+        LOG_ERROR("performance.max_frames_per_cycle must be in [1, 1000000], got %d",
+                  config->perf_max_frames_per_cycle);
         return -1;
     }
 
@@ -1353,6 +1452,26 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     ctx->config.kcp_nc             = new_cfg->kcp_nc;
     ctx->config.kcp_send_window    = new_cfg->kcp_send_window;
     ctx->config.kcp_recv_window    = new_cfg->kcp_recv_window;
+    ctx->config.perf_af_packet_sndbuf = new_cfg->perf_af_packet_sndbuf;
+    ctx->config.perf_af_packet_rcvbuf = new_cfg->perf_af_packet_rcvbuf;
+    ctx->config.perf_af_packet_send_retry_max =
+        new_cfg->perf_af_packet_send_retry_max;
+    ctx->config.perf_af_packet_send_wait_ms =
+        new_cfg->perf_af_packet_send_wait_ms;
+    ctx->config.perf_proxy_tcp_sockbuf = new_cfg->perf_proxy_tcp_sockbuf;
+    ctx->config.perf_kcp_read_pause_waitsnd =
+        new_cfg->perf_kcp_read_pause_waitsnd;
+    ctx->config.perf_kcp_read_resume_waitsnd =
+        new_cfg->perf_kcp_read_resume_waitsnd;
+    ctx->config.perf_kcp_immediate_flush =
+        new_cfg->perf_kcp_immediate_flush;
+    ctx->config.perf_max_frames_per_cycle =
+        new_cfg->perf_max_frames_per_cycle;
+
+    af_packet_configure(ctx->config.perf_af_packet_sndbuf,
+                        ctx->config.perf_af_packet_rcvbuf,
+                        ctx->config.perf_af_packet_send_retry_max,
+                        ctx->config.perf_af_packet_send_wait_ms);
 
     /* Update KCP params on all existing channels */
     for (uint32_t i = 0; i < ctx->channel_hash_size; i++) {
@@ -1682,6 +1801,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    af_packet_configure(g_ctx->config.perf_af_packet_sndbuf,
+                        g_ctx->config.perf_af_packet_rcvbuf,
+                        g_ctx->config.perf_af_packet_send_retry_max,
+                        g_ctx->config.perf_af_packet_send_wait_ms);
+
     /* ================================================================
      * 4b. 初始化加密模块
      * ================================================================ */
@@ -1898,7 +2022,7 @@ int main(int argc, char *argv[])
      *   e) 配置重载检查（reload_requested 标志）
      *      config_reload() — 软参数更新 + 通道 diff
      *
-     * 性能保护：MAX_FRAMES_PER_CYCLE=64，防止单次循环处理过多帧
+     * 性能保护：performance.max_frames_per_cycle 限制单次循环处理帧数
      *           导致饿死代理 I/O 事件。
      * ────────────────────────────────────────────────────────────────────── */
     {
@@ -1941,7 +2065,14 @@ int main(int argc, char *argv[])
                     uint16_t ethtype __attribute__((unused));
 
                     int frame_count = 0;
-                    while (frame_count < MAX_FRAMES_PER_CYCLE) {
+                    int max_frames_per_cycle =
+                        g_ctx->config.perf_max_frames_per_cycle;
+
+                    if (max_frames_per_cycle <= 0) {
+                        max_frames_per_cycle = PERF_MAX_FRAMES_PER_CYCLE;
+                    }
+
+                    while (frame_count < max_frames_per_cycle) {
                         ssize_t len = af_packet_recv(g_ctx->raw_sock, buf, sizeof(buf),
                                                      src_mac, dst_mac, &ethtype);
                         if (len < 0) {
@@ -1997,8 +2128,9 @@ int main(int argc, char *argv[])
                         /* 路由到通道处理 */
                         channel_process_frame(g_ctx, &hdr, payload, payload_len);
                     }
-                    if (frame_count >= MAX_FRAMES_PER_CYCLE) {
-                        LOG_WARN("Reached max frames per cycle (%d), possible frame flood", MAX_FRAMES_PER_CYCLE);
+                    if (frame_count >= max_frames_per_cycle) {
+                        LOG_WARN("Reached max frames per cycle (%d), possible frame flood",
+                                 max_frames_per_cycle);
                     }
                 } else {
                     /* 代理事件：本地套接字 I/O */

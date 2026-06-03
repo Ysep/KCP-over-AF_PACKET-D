@@ -92,6 +92,17 @@
 #define KCP_NC                  1           /* 禁用拥塞控制 */
 #define KCP_UPDATE_INTERVAL     10          /* ikcp_update 调用间隔（ms） */
 
+/* 性能调优默认值 */
+#define PERF_AF_PACKET_SNDBUF           (16 * 1024 * 1024) /* AF_PACKET 发送缓冲 */
+#define PERF_AF_PACKET_RCVBUF           (16 * 1024 * 1024) /* AF_PACKET 接收缓冲 */
+#define PERF_AF_PACKET_SEND_RETRY_MAX   8                  /* AF_PACKET EAGAIN 重试次数 */
+#define PERF_AF_PACKET_SEND_WAIT_MS     1                  /* AF_PACKET 每次重试等待时间 */
+#define PERF_PROXY_TCP_SOCKBUF          (4 * 1024 * 1024)  /* 本地 TCP socket 缓冲 */
+#define PERF_KCP_READ_PAUSE_WAITSND     (KCP_SEND_WINDOW * 4) /* KCP 读暂停水位 */
+#define PERF_KCP_READ_RESUME_WAITSND    (KCP_SEND_WINDOW * 2) /* KCP 读恢复水位 */
+#define PERF_KCP_IMMEDIATE_FLUSH        1                  /* KCP 入队后立即 flush */
+#define PERF_MAX_FRAMES_PER_CYCLE       8192               /* 每轮最多处理 AF_PACKET 帧 */
+
 /* Channel 常量 */
 #define MAX_CHANNELS            65536       /* 最大通道配置数 */
 #define CHANNEL_HASH_SIZE_DEFAULT 1024      /* 默认哈希表大小 */
@@ -368,6 +379,17 @@ typedef struct {
     int         kcp_interval;           /* 内部更新间隔 */
     int         kcp_resend;             /* 快速重传 */
     int         kcp_nc;                 /* 流控关闭 */
+
+    /* 性能调优配置 */
+    int         perf_af_packet_sndbuf;          /* AF_PACKET SO_SNDBUF */
+    int         perf_af_packet_rcvbuf;          /* AF_PACKET SO_RCVBUF */
+    int         perf_af_packet_send_retry_max;  /* AF_PACKET EAGAIN 重试次数 */
+    int         perf_af_packet_send_wait_ms;    /* AF_PACKET 每次重试等待时间 */
+    int         perf_proxy_tcp_sockbuf;         /* 本地 TCP SO_SNDBUF/SO_RCVBUF */
+    int         perf_kcp_read_pause_waitsnd;    /* KCP waitsnd 高水位 */
+    int         perf_kcp_read_resume_waitsnd;   /* KCP waitsnd 低水位 */
+    int         perf_kcp_immediate_flush;       /* KCP send 后立即 flush */
+    int         perf_max_frames_per_cycle;      /* 主循环每轮最多处理 AF_PACKET 帧 */
 
     /* 代理配置 */
     node_type_t node_type;            /* 节点角色（frontend/backend） */
