@@ -377,3 +377,29 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 12:05 新增端口范围配置示例
+
+Commit: 本次自动提交
+
+### 背景
+
+端口范围功能已经支持 `listen_port_range` 和 `remote_port_range`，但 `sample` 目录里仍只有单端口配置示例。使用新功能时，用户需要一个可直接参考的前后端配置样例，尤其是与你当前 B/C 拓扑一致的 `54320-54326` 连续端口代理场景。
+
+### 变更
+
+- 新增 `sample/config-node-b-port-range.json`，提供 frontend 端口范围代理示例。
+- 新增 `sample/config-node-c-port-range.json`，提供 backend 对应配置示例。
+- 两个示例均使用 `listen_port_range: "54320-54326"` 和 `remote_port_range: "54320-54326"`，并保留 `max_sessions: 256`。
+
+### 验证
+
+已执行：
+
+```bash
+python3 -m json.tool sample/config-node-b-port-range.json
+python3 -m json.tool sample/config-node-c-port-range.json
+make
+```
+
+结果：全部通过。
