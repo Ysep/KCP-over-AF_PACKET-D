@@ -67,6 +67,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdio.h>
@@ -828,7 +829,7 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
 {
     uint8_t         buf[PROXY_READ_BUF_SIZE];
     ssize_t         n;
-    int             total_read = 0;
+    size_t          total_read = 0;
 
     if (!ctx || !ch) {
         LOG_ERROR("proxy_handle_local_read: null pointer");
@@ -859,7 +860,7 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
         while (1) {
             n = read(ch->local_fd, buf, sizeof(buf));
             if (n > 0) {
-                total_read += n;
+                total_read += (size_t)n;
 
                 /* 将数据送入 KCP */
                 if (channel_send_data(ch, buf, (size_t)n) < 0) {
@@ -934,7 +935,7 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                 continue;
             }
 
-            total_read += (int)n;
+            total_read += (size_t)n;
 
             /* 将数据报送入 KCP */
             if (channel_send_data(ch, buf, (size_t)n) < 0) {
@@ -947,10 +948,14 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
         }
     }
 
-    LOG_DEBUG("proxy_handle_local_read: read %d bytes from fd=%d (channel=%u)",
+    LOG_DEBUG("proxy_handle_local_read: read %zu bytes from fd=%d (channel=%u)",
               total_read, ch->local_fd, ch->channel_id);
 
-    return total_read;
+    if (total_read > (size_t)INT_MAX) {
+        return INT_MAX;
+    }
+
+    return (int)total_read;
 }
 
 /*
