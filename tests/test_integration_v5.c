@@ -2041,6 +2041,39 @@ cleanup:
     return;
 }
 
+/* Test 61b: static LISTENER creation bypasses runtime rate limit */
+static void test_channel_listener_bypasses_rate_limit(void)
+{
+    TEST("channel_create LISTENER bypasses rate limit");
+    static global_ctx_t ctx;
+    channel_t *listener = NULL;
+    channel_t *initiator = NULL;
+
+    CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
+
+    ctx.channel_create_max_per_sec = 1;
+    ctx.channel_create_timestamp = (uint32_t)time(NULL);
+    ctx.channel_create_count = 1;
+
+    initiator = channel_create(&ctx, 30011, CHANNEL_ROLE_INITIATOR,
+                               8080, 9090, "0.0.0.0", "10.0.0.1", 1);
+    CHECK(initiator == NULL, "initiator should hit rate limit");
+
+    listener = channel_create(&ctx, 30012, CHANNEL_ROLE_LISTENER,
+                              8081, 9091, "0.0.0.0", "10.0.0.2", 1);
+    CHECK(listener != NULL, "listener should bypass rate limit");
+    CHECK(listener->state == CHANNEL_ESTABLISHED,
+          "listener should initialize successfully");
+
+    channel_shutdown(&ctx);
+    PASS();
+    return;
+
+cleanup:
+    channel_shutdown(&ctx);
+    return;
+}
+
 /* ============================================================================
  * Part B, Tests 61-70: channel_update_config & Reload Simulation
  * ============================================================================ */
@@ -3461,6 +3494,7 @@ int main(void)
     test_channel_multiple_findable();
     test_channel_hash_collision();
     test_channel_create_duplicate_id();
+    test_channel_listener_bypasses_rate_limit();
 
     print_banner("channel_update_config & Reload (Tests 61-70)");
     test_update_config_listen_port();

@@ -490,8 +490,9 @@ channel_t *channel_create(global_ctx_t *ctx, uint32_t channel_id,
         return NULL;
     }
 
-    /* 速率限制：防 SYN flood */
-    if (ctx->channel_create_max_per_sec > 0) {
+    /* 速率限制：仅针对运行期动态通道，静态 LISTENER 不受此限制 */
+    if (role != CHANNEL_ROLE_LISTENER &&
+        ctx->channel_create_max_per_sec > 0) {
         uint32_t now = (uint32_t)time(NULL);
         if (now != ctx->channel_create_timestamp) {
             ctx->channel_create_timestamp = now;

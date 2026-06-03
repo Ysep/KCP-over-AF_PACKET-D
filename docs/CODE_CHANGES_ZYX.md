@@ -499,3 +499,45 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 12:47 静态端口范围启动不再触发创建限速
+
+Commit: 本次自动提交
+
+### 背景
+
+将配置改为：
+
+```json
+"listen_port_range": "9100-54326",
+"remote_port_range": "9100-54326"
+```
+
+后，启动阶段需要一次性展开并创建大量静态 listener。此前启动到第 1001 个通道时会报：
+
+- `channel_create: rate limit exceeded (1000/sec)`
+- `Failed to create channel id=1001`
+
+随后清理阶段又伴随 AF_PACKET 发送缓冲相关错误日志。
+
+### 根因
+
+`channel_create()` 的每秒 1000 个通道创建限速原本用于运行期动态通道创建的防护，但实现上同样作用于启动阶段的静态 `CHANNEL_ROLE_LISTENER` 创建。端口范围展开为数万条静态 listener 后，会在进程启动的同一秒内命中该限速，导致配置合法却无法完成初始化。
+
+### 变更
+
+- 将通道创建限速收窄到非 `CHANNEL_ROLE_LISTENER` 的运行期通道创建。
+- 静态 listener 的启动和热重载创建不再受 `1000/sec` 限速影响。
+- 新增回归测试，验证在同一秒内已达到限速计数时，`INITIATOR` 仍会被限速，而 `LISTENER` 可以继续成功创建。
+
+### 验证
+
+已执行：
+
+```bash
+make test-integ5
+make
+make test
+```
+
+结果：全部通过。
