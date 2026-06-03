@@ -80,8 +80,8 @@
  * ============================================================================ */
 
 /* 高性能套接字缓冲区大小 */
-#define AF_PKT_SOCK_SNDBUF      (256 * 1024)
-#define AF_PKT_SOCK_RCVBUF      (512 * 1024)
+#define AF_PKT_SOCK_SNDBUF      (4 * 1024 * 1024)
+#define AF_PKT_SOCK_RCVBUF      (4 * 1024 * 1024)
 
 /* /proc/net/packet 行最大长度 */
 #define PROC_NET_PACKET_LINE_MAX 512
@@ -393,6 +393,12 @@ ssize_t af_packet_send(int sock, int ifindex,
                   (const struct sockaddr *)&sll, sizeof(sll));
     if (sent < 0) {
         saved_errno = errno;
+        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) {
+            LOG_DEBUG("af_packet_send: send buffer full "
+                      "(ifindex=%d, len=%zu)", ifindex, frame_len);
+            errno = saved_errno;
+            return -1;
+        }
         LOG_ERROR("af_packet_send: sendto failed (ifindex=%d, len=%zu): %s",
                   ifindex, frame_len, strerror(saved_errno));
         errno = saved_errno;

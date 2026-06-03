@@ -193,10 +193,21 @@ static int kcp_output_cb(const char *buf, int len, struct IKCPCB *kcp, void *use
                           ch->ethertype,
                           frame_buf, (size_t)frame_len);
     if (sent < 0) {
+        int saved_errno = errno;
+
+        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) {
+            LOG_DEBUG("kcp_output_cb: AF_PACKET send buffer full "
+                      "(channel=%u, frame_len=%zd)",
+                      ch->channel_id, frame_len);
+            errno = saved_errno;
+            return 0;
+        }
+
         LOG_ERROR("kcp_output_cb: af_packet_send failed "
                   "(channel=%u, frame_len=%zd): %s",
-                  ch->channel_id, frame_len, strerror(errno));
+                  ch->channel_id, frame_len, strerror(saved_errno));
         ch->stats.tx_errors++;
+        errno = saved_errno;
         return -1;
     }
 
