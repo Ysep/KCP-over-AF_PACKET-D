@@ -59,6 +59,36 @@ make test
 
 结果：全部通过。
 
+## 2026-06-03 17:05 减少隧道高吞吐发送丢帧
+
+Commit: `0a2f84a`
+
+### 背景
+
+服务器 A 直连服务器 D 执行 `iperf3 -c 192.168.1.149 -n 1G` 时约为 2.14 Gbit/s；经过 `kcp-afpacket` 隧道执行 `iperf3 -c 192.168.1.198 -n 1G` 时约为 304 Mbit/s，且发送端出现 `Retr=237`，说明隧道路径存在明显丢帧或发送侧背压处理不当。
+
+### 根因
+
+AF_PACKET 原始 socket 使用非阻塞发送。高吞吐场景下发送缓冲短暂打满会返回 `EAGAIN/EWOULDBLOCK`；如果 KCP output 路径没有等到帧真正进入内核发送队列，KCP 数据帧会在发送层丢失，最终表现为上层 TCP 大量重传、窗口收缩和吞吐下降。同时本地 TCP 连接未主动扩大 socket 收发缓冲，在 iperf 大流量下更容易形成内核侧背压。
+
+### 变更
+
+- `af_packet_send()` 对 `EAGAIN/EWOULDBLOCK` 增加短等待 `poll(POLLOUT)` 重试，减少 AF_PACKET 发送缓冲瞬时满导致的 KCP 帧丢失。
+- 保留重试上限，避免单个发送点长时间阻塞主循环。
+- frontend accept 出来的客户端 TCP fd 和 backend connect 到服务端的 TCP fd 均设置 4 MiB `SO_RCVBUF/SO_SNDBUF`。
+- 本次提交同时按要求纳入当前已变动文件和重编译后的 `kcp-afpacket`。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
+
 ## 2026-06-03 16:45 提升默认性能参数以满足吞吐目标
 
 Commit: `c2f1af5`
