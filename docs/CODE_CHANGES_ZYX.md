@@ -429,3 +429,44 @@ make
 ```
 
 结果：全部通过。
+
+## 2026-06-03 12:23 修正异步 connect 失败的事件处理顺序
+
+Commit: 本次自动提交
+
+### 背景
+
+服务器 C 使用端口范围配置时，服务器 A 执行：
+
+```bash
+nmap -sT -p 54320-55326 192.168.1.198
+```
+
+后端日志出现：
+
+- `proxy_connect_remote: connecting to 192.168.1.67:54321 ...`
+- `proxy_handle_local_read: read(fd=5) ended with No route to host ...`
+
+这类日志出现在目标端口不可达或路由失败的收尾阶段，容易误导为“本地读错误”，而不是“异步 connect 失败”。
+
+### 根因
+
+后端 `proxy_connect_remote()` 对目标服务使用非阻塞 `connect()`。当连接还处于 `connect_pending` 时，`proxy_handle_event()` 先按 `EPOLLIN` 调用 `proxy_handle_local_read()`，而没有先通过 `getsockopt(SO_ERROR)` 确认异步连接结果。内核把连接失败通过事件返回时，当前代码就把它错误归类成了读路径上的 `No route to host`。
+
+### 变更
+
+- 新增异步连接完成辅助逻辑，统一通过 `getsockopt(SO_ERROR)` 确认 `connect_pending` 套接字的结果。
+- `proxy_handle_event()` 在处理 `EPOLLIN/EPOLLOUT/EPOLLERR/EPOLLHUP` 前，若通道仍处于 `connect_pending`，优先完成连接状态确认。
+- 连接失败时直接按会话关闭路径处理，不再先落入 `proxy_handle_local_read()` 并输出误导性的 `read(...): No route to host` 日志。
+- `proxy_handle_local_write()` 复用同一套异步连接确认逻辑，避免写路径和事件路径重复维护。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
