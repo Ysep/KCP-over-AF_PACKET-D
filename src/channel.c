@@ -1875,6 +1875,12 @@ void channel_close_all(global_ctx_t *ctx)
         while (ch) {
             channel_t *next = ch->hash_next;
 
+            if ((ch->flags & CH_FLAG_STATIC_LISTENER) ||
+                ch->role == CHANNEL_ROLE_LISTENER) {
+                ch = next;
+                continue;
+            }
+
             if (ch->state == CHANNEL_ESTABLISHED) {
                 LOG_DEBUG("channel_close_all: sending FIN to channel %u",
                           ch->channel_id);

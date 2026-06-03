@@ -35,6 +35,52 @@ make test
 
 结果：全部通过。
 
+## 2026-06-03 13:46 前端监听 FD 预算预检与静态 listener 关闭清理修正
+
+Commit: bd3c66b
+
+### 背景
+
+服务器 B 使用超大连续端口范围：
+
+```json
+"listen_port_range": "9100-54326",
+"remote_port_range": "9100-54326"
+```
+
+仍会在 frontend 启动监听阶段报错：
+
+- `proxy_start_listen: socket(TCP) failed: Too many open files`
+- `Failed to start listen for channel id=1020`
+
+随后清理阶段又继续出现：
+
+- `af_packet_send: sendto failed ... Resource temporarily unavailable`
+- `channel_close_all: failed to send FIN to channel ...`
+
+### 根因
+
+- frontend 每个静态 TCP 监听端口都需要一个独立监听 socket。`9100-54326` 会展开为 45227 个 listener，远超常见进程 `RLIMIT_NOFILE` 软限制，因此 `socket()` 在启动到一部分端口后必然触发 `EMFILE`。
+- 启动失败进入清理路径时，`channel_close_all()` 还会把静态 `CHANNEL_ROLE_LISTENER` 当作普通已建立通道发送 FIN/RST，进一步制造无意义的 AF_PACKET 发送压力和连带错误日志。
+
+### 变更
+
+- 在 frontend 启动、热重载新增通道、`ctl add` 新增通道前，新增 `RLIMIT_NOFILE` 预算预检。
+- 预检会结合当前已打开 fd 数、待新增 listener 数和保留余量，提前报出明确错误，提示缩小 `listen_port_range` 或提高 `ulimit -n`。
+- `channel_close_all()` 现在跳过静态 listener 和 `CHANNEL_ROLE_LISTENER`，清理时只对真实会话通道发送 FIN/RST。
+- 新增回归测试，验证 `channel_close_all()` 不会把静态 listener 错误推进到 `FIN_SENT`。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
+
 ## 2026-06-02 允许握手期通道发送数据
 
 Commit: `f9a1d9b`

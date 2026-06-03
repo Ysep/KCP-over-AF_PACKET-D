@@ -2074,6 +2074,43 @@ cleanup:
     return;
 }
 
+/* Test 61c: close_all must skip static LISTENER control frames */
+static void test_channel_close_all_skips_static_listener(void)
+{
+    TEST("channel_close_all skips static LISTENER");
+    static global_ctx_t ctx;
+    channel_t *listener = NULL;
+    channel_t *peer = NULL;
+
+    CHECK(init_test_ctx(&ctx) == 0, "init_test_ctx failed");
+
+    listener = channel_create(&ctx, 30013, CHANNEL_ROLE_LISTENER,
+                              8082, 9092, "0.0.0.0", "10.0.0.3", 1);
+    CHECK(listener != NULL, "listener create failed");
+    listener->flags |= CH_FLAG_STATIC_LISTENER;
+    listener->state = CHANNEL_ESTABLISHED;
+
+    peer = channel_create(&ctx, 30014, CHANNEL_ROLE_RESPONDER,
+                          8083, 9093, "0.0.0.0", "10.0.0.4", 1);
+    CHECK(peer != NULL, "peer create failed");
+    peer->state = CHANNEL_ESTABLISHED;
+
+    channel_close_all(&ctx);
+
+    CHECK(listener->state == CHANNEL_ESTABLISHED,
+          "static listener must not enter FIN_SENT during cleanup");
+    CHECK(peer->state == CHANNEL_FIN_SENT,
+          "data channel should still enter FIN_SENT during cleanup");
+
+    channel_shutdown(&ctx);
+    PASS();
+    return;
+
+cleanup:
+    channel_shutdown(&ctx);
+    return;
+}
+
 /* ============================================================================
  * Part B, Tests 61-70: channel_update_config & Reload Simulation
  * ============================================================================ */
@@ -3495,6 +3532,7 @@ int main(void)
     test_channel_hash_collision();
     test_channel_create_duplicate_id();
     test_channel_listener_bypasses_rate_limit();
+    test_channel_close_all_skips_static_listener();
 
     print_banner("channel_update_config & Reload (Tests 61-70)");
     test_update_config_listen_port();

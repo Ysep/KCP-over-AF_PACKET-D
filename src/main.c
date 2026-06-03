@@ -77,8 +77,10 @@
 #include <signal.h>
 #include <getopt.h>
 #include <errno.h>
+#include <dirent.h>
 #include <arpa/inet.h>
 #include <sys/epoll.h>
+#include <sys/resource.h>
 #include <json-c/json.h>
 
 #include "types.h"
@@ -102,6 +104,76 @@ static global_ctx_t *g_ctx = NULL;
 
 /* ---- 前向声明 ---- */
 static void cleanup(global_ctx_t *ctx);
+
+#define FRONTEND_FD_RESERVE 32
+
+static int count_open_fds(void)
+{
+    DIR *dir;
+    struct dirent *ent;
+    int count = 0;
+
+    dir = opendir("/proc/self/fd");
+    if (!dir) {
+        return -1;
+    }
+
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+            continue;
+        }
+        count++;
+    }
+
+    closedir(dir);
+    return count;
+}
+
+static int ensure_listener_fd_budget(global_ctx_t *ctx,
+                                     int additional_listeners,
+                                     const char *phase,
+                                     uint32_t channel_id)
+{
+    struct rlimit rl;
+    int open_fds;
+    rlim_t projected;
+
+    if (!ctx || ctx->config.node_type != NODE_TYPE_FRONTEND ||
+        additional_listeners <= 0) {
+        return 0;
+    }
+
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0) {
+        LOG_WARN("fd budget check skipped during %s: getrlimit failed: %s",
+                 phase, strerror(errno));
+        return 0;
+    }
+
+    if (rl.rlim_cur == RLIM_INFINITY) {
+        return 0;
+    }
+
+    open_fds = count_open_fds();
+    if (open_fds < 0) {
+        LOG_WARN("fd budget check skipped during %s: cannot inspect /proc/self/fd: %s",
+                 phase, strerror(errno));
+        return 0;
+    }
+
+    projected = (rlim_t)open_fds +
+                (rlim_t)additional_listeners +
+                (rlim_t)FRONTEND_FD_RESERVE;
+    if (projected <= rl.rlim_cur) {
+        return 0;
+    }
+
+    LOG_ERROR("fd budget insufficient during %s: open_fds=%d, need_listeners=%d, "
+              "reserve=%d, soft_limit=%llu, channel=%u. "
+              "Reduce listen_port_range/listener count or raise 'ulimit -n'.",
+              phase, open_fds, additional_listeners, FRONTEND_FD_RESERVE,
+              (unsigned long long)rl.rlim_cur, channel_id);
+    return -1;
+}
 
 /* ──────────────────────────────────────────────────────────────────────────
  * signal_handler — 统一信号处理器
@@ -1136,6 +1208,10 @@ static void config_reload_channels(global_ctx_t *ctx,
                           new_ch->channel_id);
                 continue;
             }
+            if (ensure_listener_fd_budget(ctx, 1, "config_reload",
+                                          new_ch->channel_id) != 0) {
+                continue;
+            }
 
             channel_t *ch = channel_create(ctx, new_ch->channel_id,
                                            CHANNEL_ROLE_LISTENER,
@@ -1388,6 +1464,9 @@ static int channel_ctl_add(global_ctx_t *ctx, const channel_config_t *cfg)
     if (ctx->config.node_type == NODE_TYPE_FRONTEND &&
         proxy_port_conflict(ctx, cfg->listen_addr, cfg->listen_port, 0)) {
         LOG_ERROR("ctl_add: port %s:%u already in use", cfg->listen_addr, cfg->listen_port);
+        return -1;
+    }
+    if (ensure_listener_fd_budget(ctx, 1, "ctl_add", cfg->channel_id) != 0) {
         return -1;
     }
     channel_t *ch = channel_create(ctx, cfg->channel_id, CHANNEL_ROLE_LISTENER,
@@ -1718,6 +1797,13 @@ int main(int argc, char *argv[])
     /* ================================================================
      * 13. 创建通道并为每个通道启动代理监听
      * ================================================================ */
+    if (g_ctx->config.node_type == NODE_TYPE_FRONTEND &&
+        ensure_listener_fd_budget(g_ctx, g_ctx->config.channel_count,
+                                  "startup", 0) != 0) {
+        cleanup(g_ctx);
+        return 1;
+    }
+
     for (int i = 0; i < g_ctx->config.channel_count; i++) {
         channel_config_t *ch_cfg = &g_ctx->config.channels[i];
 
