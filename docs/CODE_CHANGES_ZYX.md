@@ -403,3 +403,29 @@ make
 ```
 
 结果：全部通过。
+
+## 2026-06-03 12:23 补充 remote_port 起始端口递增样例
+
+Commit: 本次自动提交
+
+### 背景
+
+此前新增的 `sample/config-node-*-port-range.json` 仅展示了显式 `remote_port_range` 的写法，没有覆盖 `listen_port_range` 搭配单个 `remote_port` 起始端口、由加载器自动按偏移递增远端端口的用法。
+
+### 变更
+
+- 新增 `sample/config-node-b-port-range-base-remote.json`，展示 frontend 侧使用 `listen_port_range: "5201-5203"` 与 `remote_port: 5201` 的配置。
+- 新增 `sample/config-node-c-port-range-base-remote.json`，展示 backend 对应配置。
+- 两个样例都使用 `channel_id: 100` 作为展开起始 ID，对应内部展开为 `100/101/102`。
+
+### 验证
+
+已执行：
+
+```bash
+python3 -m json.tool sample/config-node-b-port-range-base-remote.json
+python3 -m json.tool sample/config-node-c-port-range-base-remote.json
+make
+```
+
+结果：全部通过。
