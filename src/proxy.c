@@ -88,6 +88,10 @@
 /* KCP→本地套接字刷新时的栈缓冲区大小 */
 #define PROXY_FLUSH_BUF_SIZE    (64 * 1024)
 
+/* KCP 发送队列背压水位（ikcp_waitsnd 返回等待发送的 KCP 段数） */
+#define KCP_READ_PAUSE_WAITSND  (KCP_SEND_WINDOW * 16)
+#define KCP_READ_RESUME_WAITSND (KCP_SEND_WINDOW * 8)
+
 /* proxy_handle_local_read 已经关闭并释放动态通道 */
 #define PROXY_LOCAL_READ_CLOSED (-2)
 
@@ -104,6 +108,9 @@ static global_ctx_t *g_ctx = NULL;
 /* ============================================================================
  * 内部辅助函数（前向声明）
  * ============================================================================ */
+static int proxy_epoll_mod_events(global_ctx_t *ctx, int fd,
+                                  void *ptr, uint32_t events);
+
 static int proxy_close_read_side(global_ctx_t *ctx, channel_t *ch,
                                  const char *reason)
 {
@@ -122,6 +129,15 @@ static int proxy_close_read_side(global_ctx_t *ctx, channel_t *ch,
     }
 
     return PROXY_LOCAL_READ_CLOSED;
+}
+
+static int proxy_refresh_local_events(global_ctx_t *ctx, channel_t *ch)
+{
+    if (!ctx || !ch || ch->local_fd < 0) {
+        return 0;
+    }
+
+    return proxy_epoll_mod_events(ctx, ch->local_fd, ch, proxy_get_events(ch));
 }
 
 static int proxy_finish_async_connect(channel_t *ch)
@@ -857,6 +873,11 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
          * TCP edge-triggered 模式：在循环中读取直到 EAGAIN。
          * 这样可以一次 epoll 通知消费所有可用数据。
          */
+        proxy_update_kcp_backpressure(ctx, ch);
+        if (ch->flags & CH_FLAG_KCP_READ_PAUSED) {
+            return 0;
+        }
+
         while (1) {
             n = read(ch->local_fd, buf, sizeof(buf));
             if (n > 0) {
@@ -869,6 +890,11 @@ int proxy_handle_local_read(global_ctx_t *ctx, channel_t *ch)
                              ch->channel_id, n);
                     return proxy_close_read_side(ctx, ch,
                                                  "channel_send_data failed");
+                }
+
+                proxy_update_kcp_backpressure(ctx, ch);
+                if (ch->flags & CH_FLAG_KCP_READ_PAUSED) {
+                    break;
                 }
                 continue;
             }
@@ -1435,10 +1461,14 @@ int proxy_port_conflict(global_ctx_t *ctx, const char *listen_addr,
  */
 uint32_t proxy_get_events(channel_t *ch)
 {
-    uint32_t events = EPOLLIN | EPOLLET;
+    uint32_t events = EPOLLET;
 
     if (!ch) {
         return 0;
+    }
+
+    if (!(ch->flags & CH_FLAG_KCP_READ_PAUSED)) {
+        events |= EPOLLIN;
     }
 
     /*
@@ -1450,6 +1480,37 @@ uint32_t proxy_get_events(channel_t *ch)
     }
 
     return events;
+}
+
+void proxy_update_kcp_backpressure(global_ctx_t *ctx, channel_t *ch)
+{
+    int pending;
+
+    if (!ctx || !ch || !ch->is_tcp || !ch->kcp || ch->local_fd < 0) {
+        return;
+    }
+
+    pending = kcp_wrap_waitsnd(ch->kcp);
+    if (pending < 0) {
+        return;
+    }
+
+    if (!(ch->flags & CH_FLAG_KCP_READ_PAUSED) &&
+        pending >= KCP_READ_PAUSE_WAITSND) {
+        ch->flags |= CH_FLAG_KCP_READ_PAUSED;
+        LOG_DEBUG("proxy_update_kcp_backpressure: pause local read "
+                  "(channel=%u, waitsnd=%d)", ch->channel_id, pending);
+        proxy_refresh_local_events(ctx, ch);
+        return;
+    }
+
+    if ((ch->flags & CH_FLAG_KCP_READ_PAUSED) &&
+        pending <= KCP_READ_RESUME_WAITSND) {
+        ch->flags &= ~CH_FLAG_KCP_READ_PAUSED;
+        LOG_DEBUG("proxy_update_kcp_backpressure: resume local read "
+                  "(channel=%u, waitsnd=%d)", ch->channel_id, pending);
+        proxy_refresh_local_events(ctx, ch);
+    }
 }
 
 /* ──────────────────────────────────────────────────────────────────────────

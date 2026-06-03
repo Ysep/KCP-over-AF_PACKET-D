@@ -197,6 +197,7 @@ typedef enum {
 /* 通道标志位 */
 #define CH_FLAG_STATIC_LISTENER 0x01        /* 静态 listener 通道（不被 destroy 销毁） */
 #define CH_FLAG_RELOAD_MARKED   0x02        /* reload 临时标记（增删改匹配用） */
+#define CH_FLAG_KCP_READ_PAUSED 0x04        /* KCP 发送队列高水位，暂停本地读 */
 
 /* ── 通道角色枚举 ────────────────────────────────────────────────
  * INITIATOR (0): 主动连接方 —— 发送 SYN，驱动握手流程
@@ -459,7 +460,7 @@ typedef struct channel_s {
     uint32_t        channel_id;         /* 通道 ID */
     channel_state_t state;              /* 当前状态 */
     channel_role_t  role;               /* 通道角色 */
-    uint32_t        flags;              /* 标志位（CH_FLAG_STATIC_LISTENER / CH_FLAG_RELOAD_MARKED） */
+    uint32_t        flags;              /* 标志位（CH_FLAG_STATIC_LISTENER / CH_FLAG_RELOAD_MARKED / CH_FLAG_KCP_READ_PAUSED） */
     uint16_t        listener_idx;       /* 在 config.channels[] 中的索引 */
 
     /* KCP 实例 */

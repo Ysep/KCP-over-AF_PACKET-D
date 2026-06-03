@@ -71,6 +71,17 @@
 #include <string.h>
 #include <unistd.h>
 
+/*
+ * 部分无网络单元测试只链接 channel.c，不链接 proxy.c。
+ * 正式程序中 proxy.c 的强符号会覆盖这里的 no-op fallback。
+ */
+void __attribute__((weak))
+proxy_update_kcp_backpressure(global_ctx_t *ctx, channel_t *ch)
+{
+    (void)ctx;
+    (void)ch;
+}
+
 /* ============================================================================
  * 模块级静态变量
  * ============================================================================ */
@@ -1750,6 +1761,7 @@ void channel_kcp_update(global_ctx_t *ctx)
 
             if (ch->kcp) {
                 kcp_wrap_update(ch->kcp, current_ms);
+                proxy_update_kcp_backpressure(ctx, ch);
             }
             ch = next;
         }

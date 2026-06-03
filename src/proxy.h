@@ -98,6 +98,12 @@ void proxy_close_local(channel_t *ch);
 uint32_t proxy_get_events(channel_t *ch);
 
 /*
+ * 根据 KCP 发送队列水位更新本地读背压状态。
+ * 高水位暂停 EPOLLIN，低水位恢复 EPOLLIN。
+ */
+void proxy_update_kcp_backpressure(global_ctx_t *ctx, channel_t *ch);
+
+/*
  * 处理 epoll 事件分发到代理
  * @param ctx    全局上下文
  * @param fd     触发事件的文件描述符
