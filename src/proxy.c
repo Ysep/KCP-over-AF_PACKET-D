@@ -144,9 +144,18 @@ static int proxy_finish_async_connect(channel_t *ch)
     }
 
     if (so_err != 0) {
-        LOG_INFO("proxy_finish_async_connect: async connect failed "
-                 "(fd=%d, channel=%u): %s",
-                 ch->local_fd, ch->channel_id, strerror(so_err));
+        if (so_err == ECONNREFUSED ||
+            so_err == EHOSTUNREACH ||
+            so_err == ENETUNREACH ||
+            so_err == ETIMEDOUT) {
+            LOG_DEBUG("proxy_finish_async_connect: expected connect failure "
+                      "(fd=%d, channel=%u): %s",
+                      ch->local_fd, ch->channel_id, strerror(so_err));
+        } else {
+            LOG_INFO("proxy_finish_async_connect: async connect failed "
+                     "(fd=%d, channel=%u): %s",
+                     ch->local_fd, ch->channel_id, strerror(so_err));
+        }
         errno = so_err;
         return -1;
     }

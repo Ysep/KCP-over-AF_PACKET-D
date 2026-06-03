@@ -470,3 +470,32 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 12:36 降低预期连接失败日志级别
+
+Commit: 本次自动提交
+
+### 背景
+
+修正异步连接事件顺序后，`nmap -sT` 扫描范围端口时，后端日志不再错误显示 `proxy_handle_local_read: ... No route to host`，但仍会在 `INFO` 级别输出：
+
+- `proxy_finish_async_connect: async connect failed ... No route to host`
+
+对于扫描命中不存在或不可达的后端目标端口，这类连接失败是预期结果，不属于代理自身错误。
+
+### 变更
+
+- 将 `ECONNREFUSED`、`EHOSTUNREACH`、`ENETUNREACH`、`ETIMEDOUT` 这类预期的异步连接失败从 `INFO` 降级为 `DEBUG`。
+- 保留其它非预期异步连接失败为 `INFO`，便于继续观察真实异常。
+- 不改变失败时的会话收尾逻辑，仍然关闭本地 fd、发送 RST 并销毁动态通道。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+```
+
+结果：全部通过。
