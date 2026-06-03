@@ -303,3 +303,43 @@ make test
 ```
 
 结果：全部通过。
+
+## 2026-06-03 10:35 忽略动态通道关闭后的延迟 ACK
+
+Commit: 本次自动提交
+
+### 背景
+
+服务器 A 执行连接扫描：
+
+```bash
+nmap -sT 192.168.1.198 -p 5201
+```
+
+服务器 B 在接受新会话后，本地 TCP 连接很快被扫描端 reset：
+
+- `proxy_accept: new session chan=65541 fd=6 (listener=1)`
+- `proxy_handle_local_read: connection reset by peer on fd=6 (channel=65541), closing session`
+- `channel_process_frame: ACK for unknown channel 65541, dropping`
+
+### 根因
+
+`nmap -sT` 的 TCP connect 扫描会建立连接后快速关闭或 reset。本端收到 `ECONNRESET` 后会通过本地读侧关闭路径发送 RST 并销毁动态通道。此时对端已经发出的 ACK 控制帧可能仍在 AF_PACKET 链路上，晚到后 `channel_process_frame()` 找不到对应 channel，原逻辑把该竞态按 ERROR 返回。
+
+该 ACK 属于关闭竞态中的延迟控制帧，行为上应与未知 FIN/RST、关闭后的延迟 DATA 一样被静默丢弃，不应污染错误日志，也不应向上层返回失败。
+
+### 变更
+
+- `channel_process_frame()` 收到未知通道的 ACK 时改为 `DEBUG` 级别记录 `late ACK for unknown channel ...`，并返回成功。
+- 新增回归测试覆盖 destroyed/unknown dynamic channel 收到 ACK 的路径。
+
+### 验证
+
+已执行：
+
+```bash
+make test-integ5
+make
+```
+
+结果：全部通过。
