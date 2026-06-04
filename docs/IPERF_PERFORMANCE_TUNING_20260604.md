@@ -150,6 +150,50 @@ C ens19 RX dropped: 5492772
 5. B/C 的系统 socket buffer 上限过低是配置生效的前置问题，但临时放大后仍不是主要瓶颈。
 6. 继续接近直连速率需要代码层面的性能改造，而不是继续扩大现有配置值。
 
+## 5202 端口调试记录
+
+时间：`2026-06-04 16:07`
+
+现象：
+
+```text
+C: iperf3 -s -p 5202
+A: iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5202
+iperf3: error - control socket has closed unexpectedly
+```
+
+排查结果：
+
+1. B 当前运行进程使用的是 `/root/kcp/config-node-b.json`，不是 `/root/kcp/iperf-node-b.json`。
+2. B 的 `config-node-b.json` 已监听 `5201-5205`，其中 `5202` 通道存在。
+3. C 当前运行进程使用的是 `/root/kcp/config-node-c.json`，其中 `5202` 通道原本仍指向 `192.168.1.149:5202`，不符合“iperf3 服务端启动在 C 本机 5202”的测试方式。
+4. C 上 `/usr/bin/iperf3` 原本不是 dpkg 管理的正式安装文件，只安装了 `libiperf0`；执行 `/usr/bin/iperf3 -s -p 5202` 会直接打印 usage 并退出，导致隧道后端连接很快关闭。
+
+现场处理：
+
+```bash
+# C: 修复 iperf3 安装
+DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall iperf3
+
+# C: 将 config-node-c.json 中 channel_id=101 的目标改为本机 5202
+"remote_addr": "127.0.0.1"
+"remote_port": 5202
+
+# C: 启动本机 iperf3 服务端并重启 kcp-afpacket
+iperf3 -s -p 5202
+/root/kcp/kcp-afpacket /root/kcp/config-node-c.json
+```
+
+验证：
+
+```text
+A: iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5202
+sender:   528 MBytes, 442 Mbits/sec, Retr=169
+receiver: 517 MBytes, 433 Mbits/sec
+```
+
+本次验证未再出现 `control socket has closed unexpectedly`。C 端 kcp 日志中仍可见 iperf3 控制连接结束时的 `Connection reset by peer`，但数据连接已完整跑完 10 秒。
+
 ## 推荐保留配置
 
 目前建议保留初始 `performance`，不要使用本次测试中的大窗口 KCP 或过低背压水位：
