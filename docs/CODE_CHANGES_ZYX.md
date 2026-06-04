@@ -59,6 +59,33 @@ make test
 
 结果：全部通过。
 
+## 2026-06-04 15:32 新增 iperf3 矩阵测试脚本
+
+Commit: `6f8e83c`
+
+### 背景
+
+为了便于手动复现 2026-06-04 的 iperf3 隧道吞吐调参过程，需要将本次矩阵测试流程固化为可执行脚本。
+
+### 变更
+
+- 新增 `scripts/iperf_matrix_test.sh`。
+- 脚本支持通过环境变量配置 A/B/C/D 主机、SSH 用户、远端 kcp 目录、测试时长、并发数和结果目录。
+- 内置本次调试使用过的 performance/KCP 参数矩阵。
+- 支持 `CASE_FILTER` 只执行指定 case。
+- 支持 `APPLY_SYSCTL=1` 临时应用 B/C 的 socket buffer、netdev backlog 和 txqueuelen 调优。
+- 更新 `docs/IPERF_PERFORMANCE_TUNING_20260604.md`，补充脚本执行示例。
+
+### 验证
+
+已执行：
+
+```bash
+bash -n scripts/iperf_matrix_test.sh
+```
+
+结果：语法检查通过。
+
 ## 2026-06-04 14:35 记录 iperf3 隧道吞吐调试
 
 Commit: `0971e0f`
