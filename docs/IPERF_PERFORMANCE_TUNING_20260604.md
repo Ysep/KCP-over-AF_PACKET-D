@@ -56,6 +56,24 @@ B/C 使用：
 
 除特别说明外，表中结果均为标准 P1 隧道测试。
 
+可手动复现本次矩阵测试：
+
+```bash
+./scripts/iperf_matrix_test.sh
+```
+
+只执行某一组：
+
+```bash
+CASE_FILTER=base4096 ./scripts/iperf_matrix_test.sh
+```
+
+同时临时应用 B/C sysctl 调优：
+
+```bash
+APPLY_SYSCTL=1 ./scripts/iperf_matrix_test.sh
+```
+
 ## 测试结果
 
 | 轮次 | 关键参数 | sender | receiver | Retr | 结论 |
