@@ -1,5 +1,51 @@
 # 代码变动记录
 
+## 2026-06-04 16:07 记录 5202 端口调试
+
+Commit: `17bd193`
+
+### 背景
+
+服务器 C 本机启动 `iperf3 -s -p 5202` 后，服务器 A 通过隧道执行：
+
+```bash
+iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5202
+```
+
+出现：
+
+```text
+iperf3: error - control socket has closed unexpectedly
+```
+
+### 排查
+
+- B 当前运行的是 `/root/kcp/config-node-b.json`，该配置监听 `5201-5205`，包含 `5202`。
+- C 当前运行的是 `/root/kcp/config-node-c.json`，`channel_id=101` 原本仍指向 `192.168.1.149:5202`，不符合服务端启动在 C 本机的测试方式。
+- C 上 `/usr/bin/iperf3` 原本不是 dpkg 管理的正式安装文件，只安装了 `libiperf0`；执行 `iperf3 -s -p 5202` 会直接打印 usage 并退出。
+
+### 处理
+
+- 在 C 上重新安装 `iperf3` 包，恢复正常的 `/usr/bin/iperf3`。
+- 将 C 的 `/root/kcp/config-node-c.json` 中 `channel_id=101` 的目标改为 `127.0.0.1:5202`。
+- 重启 C 上的 `iperf3 -s -p 5202` 和 `kcp-afpacket`。
+- 更新 `docs/IPERF_PERFORMANCE_TUNING_20260604.md`，记录本次 5202 端口问题、现场处理和验证结果。
+
+### 验证
+
+已在 A 执行：
+
+```bash
+iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5202
+```
+
+结果：10 秒测试正常完成，未再出现 `control socket has closed unexpectedly`。
+
+```text
+sender:   528 MBytes, 442 Mbits/sec, Retr=169
+receiver: 517 MBytes, 433 Mbits/sec
+```
+
 ## 2026-06-03 14:02 新增端口范围配置注意事项文档
 
 Commit: ba61044
