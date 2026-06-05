@@ -1,5 +1,64 @@
 # 代码变动记录
 
+## 2026-06-05 15:27 将 AF_PACKET ENOBUFS 按发送背压重试
+
+Commit: `1cccd39`
+
+### 背景
+
+5 路 iperf3 并发压测时，服务器 B 出现：
+
+```text
+af_packet_send: sendto failed ... No buffer space available
+kcp_output_cb: af_packet_send failed ... No buffer space available
+Reached max frames per cycle (8192), possible frame flood
+```
+
+### 根因
+
+`ENOBUFS` 表示 AF_PACKET 发送队列或网卡驱动队列短时打满，语义上属于发送侧背压。原实现只对 `EAGAIN/EWOULDBLOCK` 做短等待重试，`ENOBUFS` 被直接作为硬错误记录并返回，导致并发压测时 B 端出现错误日志和 KCP 帧发送失败。
+
+### 变更
+
+- `af_packet_send()` 新增 `af_packet_send_busy_errno()`，将 `EAGAIN`、`EWOULDBLOCK`、`ENOBUFS` 统一识别为发送侧背压。
+- `af_packet_send()` 对 `ENOBUFS` 也执行 `poll(POLLOUT)` 短等待重试。
+- `kcp_output_cb()` 对最终仍未发送成功的 `ENOBUFS` 按 AF_PACKET 发送缓冲满处理，降为 `DEBUG` 路径，避免误判为硬错误。
+- 更新 `docs/PERFORMANCE_CONFIG.md`，说明 `ENOBUFS` 与 `af_packet_send_retry_max` 的关系，并补充 5 路并发建议参数。
+- 更新 `docs/IPERF_PERFORMANCE_TUNING_20260604.md`，记录本次 5 路并发 ENOBUFS 调试。
+- 本次提交包含重新编译后的 `kcp-afpacket` 二进制。
+
+### 现场验证
+
+已将新二进制部署到 B/C，并将 B/C 当前运行配置调整为：
+
+```json
+"performance": {
+    "af_packet_sndbuf": 33554432,
+    "af_packet_rcvbuf": 33554432,
+    "af_packet_send_retry_max": 32,
+    "af_packet_send_wait_ms": 1,
+    "max_frames_per_cycle": 100000
+}
+```
+
+复测 A 端 5201-5205 五路并发后，B/C 日志未再出现 `ERROR`、`WARN`、`No buffer space available` 或 `Reached max frames per cycle`。
+
+A 端 TCP `Retr` 仍偏高，说明发送队列错误已缓解，但入口 TCP 发送速率仍超过当前隧道可稳定承载速率，后续需要继续通过限速/pacing 或发送架构优化降低重传。
+
+### 本地验证
+
+已执行：
+
+```bash
+make
+make test
+python3 -m json.tool sample/config.example.json
+python3 -m json.tool sample/config-node-b.json
+python3 -m json.tool sample/config-node-c.json
+```
+
+结果：全部通过。
+
 ## 2026-06-05 15:04 补充 B/C 系统层性能调优说明
 
 Commit: `7f5e6e6`
