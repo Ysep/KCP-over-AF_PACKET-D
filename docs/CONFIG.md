@@ -61,6 +61,45 @@
 
 自定义以太网帧类型（EtherType），用于区分本系统与其他协议的数据帧。取值范围：`0x0600` ~ `0xFFFF`，不得使用保留范围 `0x0000`-`0x05FF`（IEEE 802.3 长度字段范围）以及已广泛使用的标准协议类型。**同一链路上的两个对端必须使用相同的 EtherType。** 同一网卡上部署多个实例时需使用不同的 EtherType。
 
+#### 多实例 EtherType 分配
+
+如果同一台机器、同一块网卡上启动多个 `kcp-afpacket` 实例，每一对 B/C 对端实例必须使用独立的 `ethertype`。否则多个进程会同时收到同一批 AF_PACKET 帧，动态通道 ID 又可能从相同范围开始分配，容易出现跨端口串包、错误连接后端端口或 `recv_buf overflow`。
+
+分配规则：
+
+```text
+B 的实例 1 ethertype == C 的实例 1 ethertype
+B 的实例 2 ethertype == C 的实例 2 ethertype
+不同实例之间 ethertype 不能相同
+```
+
+示例：
+
+```text
+5201 实例:
+B 5201.json ethertype = 35013
+C 5201.json ethertype = 35013
+
+5202 实例:
+B 5202.json ethertype = 35014
+C 5202.json ethertype = 35014
+
+5203 实例:
+B 5203.json ethertype = 35015
+C 5203.json ethertype = 35015
+```
+
+常用连续值：
+
+```text
+35013 = 0x88C5
+35014 = 0x88C6
+35015 = 0x88C7
+35016 = 0x88C8
+```
+
+多实例部署时，即使不同实例的 `channel_id` 都写 `100`，只要 `ethertype` 不同，也不会互相串包。反过来，如果 `ethertype` 相同，仅修改监听端口或配置文件名不能隔离不同实例。
+
 ---
 
 ### 3. `peer_mac`
@@ -375,6 +414,82 @@ PID 文件路径。用于多实例部署和进程管理（如 systemd 的 `PIDFi
 ```
 
 等价于手写 `channel_id` 为 `100`、`101`、`102` 的三条通道。
+
+#### 15.3.1 一个配置文件开启多个示例
+
+推荐优先使用一个 `kcp-afpacket` 进程加载一个包含多个 `channels` 的配置文件，而不是为每个端口启动一个进程。单进程多通道可以避免同一网卡、同一 `ethertype` 下多个进程重复收帧。
+
+每个示例写成 `channels` 数组中的一个对象：
+
+```json
+"channels": [
+    {
+        "channel_id": 100,
+        "listen_addr": "0.0.0.0",
+        "listen_port": 55222,
+        "remote_addr": "192.168.1.149",
+        "remote_port": 22,
+        "is_tcp": true,
+        "max_sessions": 256
+    },
+    {
+        "channel_id": 101,
+        "listen_addr": "0.0.0.0",
+        "listen_port": 5201,
+        "remote_addr": "192.168.1.149",
+        "remote_port": 5201,
+        "is_tcp": true,
+        "max_sessions": 2000
+    },
+    {
+        "channel_id": 102,
+        "listen_addr": "0.0.0.0",
+        "listen_port": 5202,
+        "remote_addr": "127.0.0.1",
+        "remote_port": 5202,
+        "is_tcp": true,
+        "max_sessions": 2000
+    }
+]
+```
+
+含义：
+
+- `channel_id=100`: 客户端访问 frontend 的 `55222`，backend 转发到 `192.168.1.149:22`。
+- `channel_id=101`: 客户端访问 frontend 的 `5201`，backend 转发到 `192.168.1.149:5201`。
+- `channel_id=102`: 客户端访问 frontend 的 `5202`，backend 转发到 backend 本机 `127.0.0.1:5202`。
+
+如果服务端在 backend 本机，backend 配置中的 `remote_addr` 写 `127.0.0.1`。如果服务端在另一台服务器，例如 D，则写 D 的 IP，如 `192.168.1.149`。
+
+也可以用端口范围减少重复配置：
+
+```json
+{
+    "channel_id": 200,
+    "listen_addr": "0.0.0.0",
+    "listen_port_range": "5203-5205",
+    "remote_addr": "192.168.1.149",
+    "remote_port": 5203,
+    "is_tcp": true,
+    "max_sessions": 2000
+}
+```
+
+该配置会展开为：
+
+```text
+channel_id=200, listen 5203 -> remote 5203
+channel_id=201, listen 5204 -> remote 5204
+channel_id=202, listen 5205 -> remote 5205
+```
+
+注意事项：
+
+- B/C 两端的静态 `channel_id` 必须一致。
+- 同一个配置文件内 `channel_id` 不能重复。
+- 同一个 frontend 进程内 `listen_port` 不能重复，否则绑定端口会失败。
+- `listen_port_range` 展开后的 `channel_id` 也不能与其它通道冲突。
+- 如果确实要启动多个进程实例，必须按前文为每个实例分配不同的 `ethertype`。
 
 #### 15.4 `listen_addr`
 
