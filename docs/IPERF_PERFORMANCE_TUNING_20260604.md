@@ -195,6 +195,60 @@ receiver: 517 MBytes, 433 Mbits/sec
 
 本次验证未再出现 `control socket has closed unexpectedly`。C 端 kcp 日志中仍可见 iperf3 控制连接结束时的 `Connection reset by peer`，但数据连接已完整跑完 10 秒。
 
+## 5 路并发 ENOBUFS 调试记录
+
+时间：`2026-06-05 15:27`
+
+现象：
+
+```text
+A:
+iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5201 &
+iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5202 &
+iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5203 &
+iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5204 &
+iperf3 -c 192.168.1.198 -P 1 -t 10 -p 5205
+```
+
+B 端出现：
+
+```text
+af_packet_send: sendto failed ... No buffer space available
+kcp_output_cb: af_packet_send failed ... No buffer space available
+Reached max frames per cycle (8192), possible frame flood
+```
+
+根因判断：
+
+1. `ENOBUFS` 是 AF_PACKET 发送队列或驱动队列短时打满，和 `EAGAIN/EWOULDBLOCK` 一样属于发送侧背压。
+2. 原代码只对 `EAGAIN/EWOULDBLOCK` 做短等待重试，`ENOBUFS` 被直接记录为错误并返回。
+3. 5 路并发下 `max_frames_per_cycle=8192` 容易打满单轮 raw socket 处理预算，建议并发压测时提高到 `100000` 做对比。
+
+现场处理：
+
+```json
+"performance": {
+    "af_packet_sndbuf": 33554432,
+    "af_packet_rcvbuf": 33554432,
+    "af_packet_send_retry_max": 32,
+    "af_packet_send_wait_ms": 1,
+    "max_frames_per_cycle": 100000
+}
+```
+
+代码处理：
+
+- `af_packet_send()` 将 `ENOBUFS` 纳入可重试发送背压。
+- `kcp_output_cb()` 对最终仍未发送成功的 `ENOBUFS` 按发送缓冲满处理，避免误判为硬错误。
+
+复测结果：
+
+```text
+B/C 日志：未再出现 ERROR、WARN、No buffer space available、Reached max frames per cycle。
+```
+
+A 端 5 路并发仍存在较多 TCP `Retr`，说明发送队列错误已缓解，但入口 TCP 发送速率仍超过当前隧道可稳定承载速率。后续需要继续用限速/pacing 或发送架构优化降低重传。
+
 ## 推荐保留配置
 
 目前建议保留初始 `performance`，不要使用本次测试中的大窗口 KCP 或过低背压水位：

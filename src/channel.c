@@ -195,7 +195,8 @@ static int kcp_output_cb(const char *buf, int len, struct IKCPCB *kcp, void *use
     if (sent < 0) {
         int saved_errno = errno;
 
-        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK) {
+        if (saved_errno == EAGAIN || saved_errno == EWOULDBLOCK ||
+            saved_errno == ENOBUFS) {
             LOG_DEBUG("kcp_output_cb: AF_PACKET send buffer full "
                       "(channel=%u, frame_len=%zd)",
                       ch->channel_id, frame_len);

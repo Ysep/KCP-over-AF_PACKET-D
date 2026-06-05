@@ -140,6 +140,11 @@ static size_t safe_strncpy(char *dst, const char *src, size_t dstsize)
     return i;
 }
 
+static int af_packet_send_busy_errno(int err)
+{
+    return err == EAGAIN || err == EWOULDBLOCK || err == ENOBUFS;
+}
+
 /* ============================================================================
  * af_packet_create
  * ============================================================================ */
@@ -404,7 +409,11 @@ ssize_t af_packet_send(int sock, int ifindex,
     /* --- 发送 ---
      * KCP output 回调无法回滚已经 flush 的段。非阻塞 AF_PACKET 在发送缓冲
      * 暂满时如果直接返回，会导致 KCP 帧实际丢失，上层 TCP 看到大量重传。
-     * 因此对 EAGAIN 做短等待重试，把瞬时背压尽量吸收在发送层。
+     * 因此对 EAGAIN/EWOULDBLOCK/ENOBUFS 做短等待重试，把瞬时背压
+     * 尽量吸收在发送层。
+     *
+     * ENOBUFS 常见于网卡/驱动发送队列短时打满，语义上同样是
+     * 暂时不可发送，而不是永久协议错误。
      */
     for (int attempt = 0; attempt <= g_af_packet_send_retry_max; attempt++) {
         sent = sendto(sock, frame_buf, frame_len, 0,
@@ -414,7 +423,7 @@ ssize_t af_packet_send(int sock, int ifindex,
         }
 
         saved_errno = errno;
-        if (saved_errno != EAGAIN && saved_errno != EWOULDBLOCK) {
+        if (!af_packet_send_busy_errno(saved_errno)) {
             LOG_ERROR("af_packet_send: sendto failed (ifindex=%d, len=%zu): %s",
                       ifindex, frame_len, strerror(saved_errno));
             errno = saved_errno;

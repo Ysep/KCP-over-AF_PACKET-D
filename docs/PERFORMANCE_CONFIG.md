@@ -60,9 +60,9 @@
 
 | 参数 | 默认值 | 作用 | 调大影响 | 调小影响 |
 |------|--------|------|----------|----------|
-| `af_packet_sndbuf` | `16777216` | AF_PACKET 发送 socket 缓冲，单位字节 | 降低高吞吐下 `EAGAIN` 概率 | 更早触发发送背压 |
+| `af_packet_sndbuf` | `16777216` | AF_PACKET 发送 socket 缓冲，单位字节 | 降低高吞吐下 `EAGAIN`/`ENOBUFS` 概率 | 更早触发发送背压 |
 | `af_packet_rcvbuf` | `16777216` | AF_PACKET 接收 socket 缓冲，单位字节 | 降低接收突发丢帧概率 | 更容易因收包不及时丢帧 |
-| `af_packet_send_retry_max` | `8` | AF_PACKET 发送遇到 `EAGAIN` 时的最大重试次数 | 减少 KCP 帧因发送缓冲满而丢失 | 降低主循环阻塞风险，但可能增加丢帧 |
+| `af_packet_send_retry_max` | `8` | AF_PACKET 发送遇到 `EAGAIN`/`EWOULDBLOCK`/`ENOBUFS` 时的最大重试次数 | 减少 KCP 帧因发送缓冲满而丢失 | 降低主循环阻塞风险，但可能增加丢帧 |
 | `af_packet_send_wait_ms` | `1` | 每次 AF_PACKET 发送重试前等待可写的毫秒数 | 更愿意等待网卡队列恢复 | 减少等待，突发时更容易失败 |
 | `proxy_tcp_sockbuf` | `4194304` | 本地 TCP 连接 `SO_SNDBUF`/`SO_RCVBUF`，单位字节 | 降低本地 TCP 背压 | 更快把背压传给客户端/服务端 |
 | `proxy_recv_buf_max` | `16777216` | 本地 TCP 写阻塞时，进程内待写缓冲上限，单位字节 | 减少高吞吐下 `recv_buf overflow` 断流 | 更早暴露后端写入不及时的问题，占用内存更低 |
@@ -140,6 +140,20 @@ sysctl --system
 4. 如果接收端速率周期性归零，优先调大 `max_frames_per_cycle` 和 `af_packet_rcvbuf`，避免 raw socket 收包预算不足。
 5. 如果 CPU 占用过高或其它 fd 事件被饿死，降低 `max_frames_per_cycle`，或关闭 `kcp_immediate_flush` 做对比。
 6. socket 缓冲设置可能受系统 `net.core.wmem_max` 和 `net.core.rmem_max` 限制。若配置很大但效果不明显，需要同步检查系统 sysctl。
+
+5 路及以上 iperf3 并发压测时，如果 B 端出现 `af_packet_send: sendto failed ... No buffer space available`，说明 AF_PACKET 发送队列短时打满。可先尝试：
+
+```json
+"performance": {
+    "af_packet_sndbuf": 33554432,
+    "af_packet_rcvbuf": 33554432,
+    "af_packet_send_retry_max": 32,
+    "af_packet_send_wait_ms": 1,
+    "max_frames_per_cycle": 100000
+}
+```
+
+这组参数会让发送侧更愿意等待网卡队列恢复，并提高单轮 raw socket 收包预算。代价是单次事件循环可能停留更久，CPU 占用和其它 fd 的调度延迟可能上升。若 SSH 等低延迟业务与 iperf3 混跑，需要分别对比 `8/1`、`16/1`、`32/1` 的重传和延迟。
 
 ## 热重载说明
 
