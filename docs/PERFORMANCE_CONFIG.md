@@ -84,6 +84,54 @@
 - `kcp_immediate_flush`: `true` 或 `false`
 - `max_frames_per_cycle`: `1..1000000`
 
+## B/C 系统层调优
+
+`performance` 中的 socket 缓冲配置会受 Linux 系统上限限制。如果系统 `net.core.wmem_max` / `net.core.rmem_max` 仍保持较小默认值，即使 JSON 中配置了较大的 `af_packet_sndbuf`、`af_packet_rcvbuf` 或 `proxy_tcp_sockbuf`，实际生效值也可能被内核截断。
+
+在 B/C 两台运行 `kcp-afpacket` 的服务器上，可先临时设置：
+
+```bash
+sysctl -w net.core.wmem_max=134217728
+sysctl -w net.core.rmem_max=134217728
+sysctl -w net.core.wmem_default=4194304
+sysctl -w net.core.rmem_default=4194304
+ip link set dev ens19 txqueuelen 10000
+```
+
+参数作用：
+
+| 参数 | 建议值 | 作用 |
+|------|--------|------|
+| `net.core.wmem_max` | `134217728` | 允许进程设置更大的发送 socket 缓冲上限 |
+| `net.core.rmem_max` | `134217728` | 允许进程设置更大的接收 socket 缓冲上限 |
+| `net.core.wmem_default` | `4194304` | 提高默认发送 socket 缓冲 |
+| `net.core.rmem_default` | `4194304` | 提高默认接收 socket 缓冲 |
+| `txqueuelen` | `10000` | 放大网卡发送队列长度，降低短时突发下排队过早失败的概率 |
+
+注意事项：
+
+- 上述命令只临时生效，重启后会恢复。
+- `ip link set dev ens19 txqueuelen 10000` 中的 `ens19` 需要替换为实际运行 `kcp-afpacket` 的网卡名。
+- 放大系统缓冲上限不等于立即占用对应内存；实际占用取决于 socket 数量和积压数据量。
+- 系统层调优只能避免配置被内核上限截断，不能单独解决所有吞吐或重传问题。
+
+如需持久化 sysctl，可写入 `/etc/sysctl.d/99-kcp-afpacket.conf`：
+
+```text
+net.core.wmem_max = 134217728
+net.core.rmem_max = 134217728
+net.core.wmem_default = 4194304
+net.core.rmem_default = 4194304
+```
+
+然后执行：
+
+```bash
+sysctl --system
+```
+
+`txqueuelen` 持久化方式取决于系统网络管理工具，可放入 systemd-networkd、NetworkManager dispatcher 脚本，或启动 `kcp-afpacket` 前的部署脚本中。
+
 ## 调试建议
 
 1. 如果发送端 `Retr` 很高，优先观察 `af_packet_send` 是否仍出现发送缓冲满。可以适当调大 `af_packet_sndbuf`，或调大 `af_packet_send_retry_max`。
