@@ -1,5 +1,31 @@
 # 代码变动记录
 
+## 2026-06-05 15:04 补充 B/C 系统层性能调优说明
+
+Commit: `7f5e6e6`
+
+### 背景
+
+需要将 B/C 压测时使用的系统层 socket 缓冲和网卡队列参数写入性能配置文档，说明这些参数与 `performance` JSON 配置的关系。
+
+### 变更
+
+- 更新 `docs/PERFORMANCE_CONFIG.md`。
+- 新增 “B/C 系统层调优” 章节。
+- 记录临时设置命令：
+  - `net.core.wmem_max=134217728`
+  - `net.core.rmem_max=134217728`
+  - `net.core.wmem_default=4194304`
+  - `net.core.rmem_default=4194304`
+  - `ip link set dev ens19 txqueuelen 10000`
+- 补充每个参数的作用说明。
+- 补充这些命令只临时生效、网卡名需按实际替换、放大上限不等于立即占用内存等注意事项。
+- 补充 sysctl 持久化示例和 `txqueuelen` 持久化建议。
+
+### 验证
+
+本次仅更新文档，无代码变更，无需重新编译或执行测试。
+
 ## 2026-06-05 13:52 补充多通道与多实例配置说明
 
 Commit: `619eb74`
