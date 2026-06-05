@@ -127,6 +127,14 @@ static void proxy_set_tcp_sockbuf(int fd)
 static int proxy_epoll_mod_events(global_ctx_t *ctx, int fd,
                                   void *ptr, uint32_t events);
 
+static int proxy_recv_buf_max(void)
+{
+    if (g_ctx && g_ctx->config.perf_proxy_recv_buf_max > 0) {
+        return g_ctx->config.perf_proxy_recv_buf_max;
+    }
+    return PERF_PROXY_RECV_BUF_MAX;
+}
+
 static int proxy_close_read_side(global_ctx_t *ctx, channel_t *ch,
                                  const char *reason)
 {
@@ -268,6 +276,7 @@ static int proxy_ensure_epollout(global_ctx_t *ctx, channel_t *ch)
 static int proxy_ensure_recv_buf(channel_t *ch, int needed)
 {
     int      new_cap;
+    int      max_cap;
     uint8_t *new_buf;
 
     if (!ch || needed < 0) {
@@ -278,17 +287,18 @@ static int proxy_ensure_recv_buf(channel_t *ch, int needed)
         return 0;
     }
 
-    if (needed > CHANNEL_RECV_BUF_MAX) {
+    max_cap = proxy_recv_buf_max();
+    if (needed > max_cap) {
         LOG_ERROR("proxy_ensure_recv_buf: pending buffer too large "
                   "(channel=%u, needed=%d, max=%d)",
-                  ch->channel_id, needed, CHANNEL_RECV_BUF_MAX);
+                  ch->channel_id, needed, max_cap);
         return -1;
     }
 
     new_cap = ch->recv_buf_cap > 0 ? ch->recv_buf_cap : CHANNEL_RECV_BUF_SIZE;
     while (new_cap < needed) {
-        if (new_cap > CHANNEL_RECV_BUF_MAX / 2) {
-            new_cap = CHANNEL_RECV_BUF_MAX;
+        if (new_cap > max_cap / 2) {
+            new_cap = max_cap;
         } else {
             new_cap *= 2;
         }

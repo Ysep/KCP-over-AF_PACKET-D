@@ -98,6 +98,7 @@
 #define PERF_AF_PACKET_SEND_RETRY_MAX   8                  /* AF_PACKET EAGAIN 重试次数 */
 #define PERF_AF_PACKET_SEND_WAIT_MS     1                  /* AF_PACKET 每次重试等待时间 */
 #define PERF_PROXY_TCP_SOCKBUF          (4 * 1024 * 1024)  /* 本地 TCP socket 缓冲 */
+#define PERF_PROXY_RECV_BUF_MAX         (16 * 1024 * 1024) /* 本地 socket 写阻塞待发送缓冲上限 */
 #define PERF_KCP_READ_PAUSE_WAITSND     (KCP_SEND_WINDOW * 4) /* KCP 读暂停水位 */
 #define PERF_KCP_READ_RESUME_WAITSND    (KCP_SEND_WINDOW * 2) /* KCP 读恢复水位 */
 #define PERF_KCP_IMMEDIATE_FLUSH        1                  /* KCP 入队后立即 flush */
@@ -107,7 +108,7 @@
 #define MAX_CHANNELS            65536       /* 最大通道配置数 */
 #define CHANNEL_HASH_SIZE_DEFAULT 1024      /* 默认哈希表大小 */
 #define CHANNEL_RECV_BUF_SIZE   8192        /* socket 写阻塞待发送缓冲区初始大小 */
-#define CHANNEL_RECV_BUF_MAX    (1024 * 1024) /* socket 写阻塞待发送缓冲区上限 */
+#define CHANNEL_RECV_BUF_MAX    PERF_PROXY_RECV_BUF_MAX /* 兼容旧代码的默认缓冲上限 */
 #define KCP_APP_RECV_BUF_SIZE   (64 * 1024) /* KCP 单条应用消息接收缓冲区大小 */
 #define CHANNEL_ID_STATIC_MIN   1           /* 静态通道 ID 最小值 */
 #define HEARTBEAT_CH_ID         0xFFFFFFFF  /* 全局心跳通道ID */
@@ -386,6 +387,7 @@ typedef struct {
     int         perf_af_packet_send_retry_max;  /* AF_PACKET EAGAIN 重试次数 */
     int         perf_af_packet_send_wait_ms;    /* AF_PACKET 每次重试等待时间 */
     int         perf_proxy_tcp_sockbuf;         /* 本地 TCP SO_SNDBUF/SO_RCVBUF */
+    int         perf_proxy_recv_buf_max;        /* 本地 socket 写阻塞待发送缓冲上限 */
     int         perf_kcp_read_pause_waitsnd;    /* KCP waitsnd 高水位 */
     int         perf_kcp_read_resume_waitsnd;   /* KCP waitsnd 低水位 */
     int         perf_kcp_immediate_flush;       /* KCP send 后立即 flush */

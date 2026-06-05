@@ -12,6 +12,7 @@
         "af_packet_send_retry_max": 8,
         "af_packet_send_wait_ms": 1,
         "proxy_tcp_sockbuf": 4194304,
+        "proxy_recv_buf_max": 16777216,
         "kcp_read_pause_waitsnd": 4096,
         "kcp_read_resume_waitsnd": 2048,
         "kcp_immediate_flush": true,

@@ -599,6 +599,7 @@ int config_load(const char *path, global_config_t *config)
     config->perf_af_packet_send_retry_max = PERF_AF_PACKET_SEND_RETRY_MAX;
     config->perf_af_packet_send_wait_ms = PERF_AF_PACKET_SEND_WAIT_MS;
     config->perf_proxy_tcp_sockbuf = PERF_PROXY_TCP_SOCKBUF;
+    config->perf_proxy_recv_buf_max = PERF_PROXY_RECV_BUF_MAX;
     config->perf_kcp_read_pause_waitsnd = PERF_KCP_READ_PAUSE_WAITSND;
     config->perf_kcp_read_resume_waitsnd = PERF_KCP_READ_RESUME_WAITSND;
     config->perf_kcp_immediate_flush = PERF_KCP_IMMEDIATE_FLUSH;
@@ -615,6 +616,8 @@ int config_load(const char *path, global_config_t *config)
             config->perf_af_packet_send_wait_ms = json_object_get_int(tmp);
         if (json_object_object_get_ex(obj, "proxy_tcp_sockbuf", &tmp))
             config->perf_proxy_tcp_sockbuf = json_object_get_int(tmp);
+        if (json_object_object_get_ex(obj, "proxy_recv_buf_max", &tmp))
+            config->perf_proxy_recv_buf_max = json_object_get_int(tmp);
         if (json_object_object_get_ex(obj, "kcp_read_pause_waitsnd", &tmp))
             config->perf_kcp_read_pause_waitsnd = json_object_get_int(tmp);
         if (json_object_object_get_ex(obj, "kcp_read_resume_waitsnd", &tmp))
@@ -965,6 +968,12 @@ int validate_config(const global_config_t *config)
         config->perf_proxy_tcp_sockbuf < 4096) {
         LOG_ERROR("performance.proxy_tcp_sockbuf must be >= 4096, got %d",
                   config->perf_proxy_tcp_sockbuf);
+        return -1;
+    }
+    if (config->perf_proxy_recv_buf_max != 0 &&
+        config->perf_proxy_recv_buf_max < KCP_APP_RECV_BUF_SIZE) {
+        LOG_ERROR("performance.proxy_recv_buf_max must be >= %d, got %d",
+                  KCP_APP_RECV_BUF_SIZE, config->perf_proxy_recv_buf_max);
         return -1;
     }
     if (config->perf_kcp_read_pause_waitsnd < 0) {
@@ -1459,6 +1468,7 @@ static int config_reload(global_ctx_t *ctx, const char *config_path)
     ctx->config.perf_af_packet_send_wait_ms =
         new_cfg->perf_af_packet_send_wait_ms;
     ctx->config.perf_proxy_tcp_sockbuf = new_cfg->perf_proxy_tcp_sockbuf;
+    ctx->config.perf_proxy_recv_buf_max = new_cfg->perf_proxy_recv_buf_max;
     ctx->config.perf_kcp_read_pause_waitsnd =
         new_cfg->perf_kcp_read_pause_waitsnd;
     ctx->config.perf_kcp_read_resume_waitsnd =
