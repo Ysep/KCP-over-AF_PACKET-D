@@ -1,5 +1,48 @@
 # 代码变动记录
 
+## 2026-06-05 11:54 支持配置本地待写缓冲上限
+
+Commit: `2c07eb0`
+
+### 背景
+
+服务器 C 在 iperf3 高吞吐转发时出现：
+
+```text
+proxy_ensure_recv_buf: pending buffer too large (channel=65537, needed=1108096, max=1048576)
+proxy_write_to_local: recv_buf overflow (channel=65537, pending=1042560, new=65536, capacity=1048576)
+channel_process_frame: proxy_write_to_local failed ... local connection lost
+```
+
+### 根因
+
+`proxy_write_to_local()` 写后端本地 TCP socket 时使用非阻塞写。如果后端 socket 短时不可写，代码会把未写完的数据暂存在通道 `recv_buf` 中，等待后续 `EPOLLOUT` 再刷新。该待写缓冲上限此前硬编码为 `1 MiB`，高吞吐 iperf3 场景下容易被 64 KiB 连续数据块快速填满，导致通道被关闭。
+
+### 变更
+
+- 新增 `performance.proxy_recv_buf_max` 配置项，控制本地 socket 写阻塞时的进程内待写缓冲上限。
+- 默认值从原硬编码 `1 MiB` 提升到 `16 MiB`。
+- `proxy_ensure_recv_buf()` 改为读取运行时配置，错误日志中的 `max=` 会显示实际配置值。
+- 配置校验要求 `proxy_recv_buf_max >= 65536`。
+- SIGHUP 热重载支持更新该参数。
+- 更新 `sample/config.example.json`、`sample/config-node-b.json`、`sample/config-node-c.json`。
+- 更新 `docs/PERFORMANCE_CONFIG.md` 和 `docs/IPERF_PERFORMANCE_TUNING_20260604.md`。
+- 本次提交包含重新编译后的 `kcp-afpacket` 二进制。
+
+### 验证
+
+已执行：
+
+```bash
+make
+make test
+python3 -m json.tool sample/config.example.json
+python3 -m json.tool sample/config-node-b.json
+python3 -m json.tool sample/config-node-c.json
+```
+
+结果：全部通过。
+
 ## 2026-06-04 16:07 记录 5202 端口调试
 
 Commit: `17bd193`
